@@ -1,12 +1,12 @@
 """
 AI Voice Testing Platform - Conversational Agent
-ElevenLabs for speech; OpenAI for conversation (agent talks to you as if you're the company).
+Uses ElevenLabs agents for browser chat, browser voice, and outbound phone calls.
 """
-import base64
 import json
 import os
 import re
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from flask import Flask, Response, jsonify, render_template, request, session
@@ -36,6 +36,20 @@ def get_elevenlabs_client():
         except ImportError:
             return None
     return ElevenLabs(api_key=api_key)
+
+
+def legacy_text_to_speech_audio(text: str):
+    try:
+        from elevenlabs import generate
+    except ImportError:
+        return None
+    return generate(
+        text=text[:1500],
+        api_key=os.getenv("ELEVENLABS_API_KEY"),
+        voice="JBFqnCBsd6RMkjVDRZzb",
+        model="eleven_turbo_v2_5",
+        stream=False,
+    )
 
 
 def collect_audio_bytes(audio_stream):
@@ -92,22 +106,26 @@ def validate_phone_number(phone_number: str):
     return bool(E164_PATTERN.match((phone_number or "").strip()))
 
 
-def elevenlabs_post(path: str, payload: dict):
+def with_text_only_override(conversation_data: dict):
+    data = json.loads(json.dumps(conversation_data))
+    conversation_config = data.setdefault("conversation_config_override", {})
+    conversation_settings = conversation_config.setdefault("conversation", {})
+    conversation_settings["text_only"] = True
+    return data
+
+
+def _elevenlabs_request(path: str, method: str = "GET", body: dict = None):
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
         raise RuntimeError("ELEVENLABS_API_KEY not set in .env")
-
-    request_body = json.dumps(payload).encode("utf-8")
-    api_request = Request(
-        f"{ELEVENLABS_API_BASE}{path}",
-        data=request_body,
-        headers={
-            "Content-Type": "application/json",
-            "xi-api-key": api_key,
-        },
-        method="POST",
-    )
-
+    url = f"{ELEVENLABS_API_BASE}{path}"
+    headers = {"xi-api-key": api_key}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode("utf-8")
+        api_request = Request(url, data=data, headers=headers, method="POST")
+    else:
+        api_request = Request(url, headers=headers, method=method)
     try:
         with urlopen(api_request, timeout=30) as response:
             raw_body = response.read().decode("utf-8")
@@ -124,17 +142,27 @@ def elevenlabs_post(path: str, payload: dict):
         raise RuntimeError(f"Could not reach ElevenLabs: {exc.reason}") from exc
 
 
+def elevenlabs_post(path: str, payload: dict):
+    return _elevenlabs_request(path, method="POST", body=payload)
+
+
+def elevenlabs_get(path: str, params: dict = None):
+    if params:
+        path = f"{path}?{urlencode(params)}"
+    return _elevenlabs_request(path, method="GET")
+
+
 def text_to_speech_audio(text: str):
     """Return MP3 bytes from ElevenLabs TTS."""
     client = get_elevenlabs_client()
-    if not client:
-        return None
-    audio_stream = client.text_to_speech.convert(
-        text=text[:1500],
-        voice_id="JBFqnCBsd6RMkjVDRZzb",
-        model_id="eleven_turbo_v2_5",
-    )
-    return collect_audio_bytes(audio_stream)
+    if client:
+        audio_stream = client.text_to_speech.convert(
+            text=text[:1500],
+            voice_id="JBFqnCBsd6RMkjVDRZzb",
+            model_id="eleven_turbo_v2_5",
+        )
+        return collect_audio_bytes(audio_stream)
+    return collect_audio_bytes(legacy_text_to_speech_audio(text))
 
 
 @app.route("/")
@@ -163,7 +191,7 @@ def tts():
 
 @app.route("/api/context", methods=["POST"])
 def set_context():
-    """Set business description and start conversation."""
+    """Set business description and scenario for voice conversation or calls."""
     data = request.get_json() or {}
     description = (data.get("description") or "").strip()
     scenario = normalize_scenario(data.get("scenario"))
@@ -171,56 +199,45 @@ def set_context():
         return jsonify({"error": "No description provided"}), 400
     session["business_description"] = description
     session["scenario"] = scenario
-    session["messages"] = []
     return jsonify({"ok": True, "scenario": scenario})
 
 
-@app.route("/api/chat", methods=["POST"])
-def chat():
-    """Send a message; agent replies as if talking to the company. Returns text + base64 audio."""
-    business_description = get_session_value("business_description")
-    scenario = normalize_scenario(get_session_value("scenario"))
-    if not business_description:
-        return jsonify({"error": "Set a business description first (use /api/context)"}), 400
+@app.route("/api/conversation/signed-url", methods=["GET", "POST"])
+def conversation_signed_url():
+    """Return a signed WebSocket URL and conversation_config_override for ElevenLabs chat or voice."""
+    agent_id = os.getenv("ELEVENLABS_AGENT_ID")
+    if not agent_id:
+        return jsonify({"error": "ELEVENLABS_AGENT_ID not set in .env (required for ElevenLabs chat and voice)."}), 500
 
-    data = request.get_json() or {}
-    user_message = (data.get("message") or "").strip()
-    if not user_message:
-        return jsonify({"error": "No message provided"}), 400
-
-    messages = session.get("messages", [])
-    system_prompt = build_caller_prompt(business_description, scenario)
-    if not messages:
-        messages = [{"role": "system", "content": system_prompt}]
-    messages.append({"role": "user", "content": user_message})
-
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
-        agent_text = "I'd like to know more about your business. (Set OPENAI_API_KEY in .env for full conversation.)"
+    if request.method == "POST":
+        data = request.get_json() or {}
     else:
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=openai_key)
-            completion = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-            )
-            agent_text = (completion.choices[0].message.content or "").strip()
-        except Exception as e:
-            agent_text = f"I had trouble responding: {e}"
+        data = request.args or {}
+    description = (data.get("description") or get_session_value("business_description")).strip()
+    scenario = normalize_scenario(data.get("scenario") or get_session_value("scenario"))
+    text_only = str(data.get("text_only", "")).lower() in {"1", "true", "yes", "on"}
 
-    messages.append({"role": "assistant", "content": agent_text})
-    session["messages"] = messages
+    if not description:
+        return jsonify({"error": "Provide a business description first (use /api/context or pass in request)."}), 400
 
-    audio_base64 = None
     try:
-        audio_bytes = text_to_speech_audio(agent_text)
-        if audio_bytes:
-            audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
-    except Exception:
-        pass
+        resp = elevenlabs_get("/v1/convai/conversation/get-signed-url", {"agent_id": agent_id})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
 
-    return jsonify({"text": agent_text, "audio_base64": audio_base64})
+    signed_url = resp.get("signed_url")
+    if not signed_url:
+        return jsonify({"error": "ElevenLabs did not return a signed_url.", "raw": resp}), 502
+
+    conversation_config_override = build_conversation_initiation_data(description, scenario)
+    if text_only:
+        conversation_config_override = with_text_only_override(conversation_config_override)
+
+    return jsonify({
+        "signed_url": signed_url,
+        "text_only": text_only,
+        "conversation_config_override": conversation_config_override.get("conversation_config_override", {}),
+    })
 
 
 @app.route("/api/call", methods=["POST"])

@@ -1,9 +1,10 @@
 # AI Voice Testing Platform
 
-Flask app for testing business phone flows with the same AI caller in two modes:
+Flask app for testing business phone flows with the same caller persona across text, browser voice, and outbound phone calls:
 
-- Web chat: roleplay the business while the agent behaves like a customer/caller.
-- Outbound phone call: trigger an ElevenLabs + Twilio call to a real phone number using the same caller context.
+- **Text chat:** Roleplay the business in the browser while the agent behaves like a customer/caller.
+- **Voice conversation (web):** Connect via browser; you are the company, the ElevenLabs agent is the customer/caller. Uses your mic and speakers.
+- **Outbound phone call:** Trigger an ElevenLabs + Twilio call to a real phone number with the same agent and context.
 
 ## Setup
 
@@ -27,11 +28,10 @@ python app.py
 
 ## Required environment variables
 
-- `FLASK_SECRET_KEY`: Flask session secret.
-- `ELEVENLABS_API_KEY`: ElevenLabs API key for TTS and outbound calls.
-- `OPENAI_API_KEY`: OpenAI key for the web chat agent.
-- `ELEVENLABS_AGENT_ID`: ElevenLabs Conversational AI agent ID used for phone calls.
-- `ELEVENLABS_AGENT_PHONE_NUMBER_ID`: ElevenLabs phone number ID connected to Twilio for outbound calling.
+- `FLASK_SECRET_KEY`: Flask session secret (optional for dev).
+- `ELEVENLABS_API_KEY`: ElevenLabs API key (text chat, voice, and outbound calls).
+- `ELEVENLABS_AGENT_ID`: ElevenLabs Conversational AI agent ID (required for both web voice conversation and phone calls).
+- `ELEVENLABS_AGENT_PHONE_NUMBER_ID`: ElevenLabs phone number ID (Twilio) for outbound calling only.
 
 ## ElevenLabs phone setup
 
@@ -44,16 +44,22 @@ To make phone calls work:
 3. Import or connect a Twilio-backed phone number inside ElevenLabs, then copy the resulting phone number ID.
 4. Put the agent ID and phone number ID into `.env`.
 
-The app sends the business description and scenario through `conversation_initiation_client_data.conversation_config_override` so the phone call stays aligned with the same caller persona used in the web chat.
+The app sends the business description and scenario through `conversation_initiation_client_data.conversation_config_override` so the phone call uses the same caller persona as the web voice conversation.
 
 ## Usage
 
-### Web chat
+### Text chat
 
-1. Enter a business description.
-2. Optionally enter a scenario such as `check appointment availability`.
-3. Click `Start conversation`.
-4. Reply as the business; the agent replies as the caller/customer and returns ElevenLabs audio.
+1. Enter a business description and optional scenario.
+2. Click **Save agent context**.
+3. Use the text chat section to reply as the company. The page creates a text-only ElevenLabs conversation session behind the scenes.
+
+### Voice conversation (web)
+
+1. Enter a business description and optional scenario.
+2. Click **Save agent context**.
+3. Click **Connect & start speaking**. Allow microphone access.
+4. Speak as the company; the ElevenLabs agent responds as the customer/caller.
 
 ### Outbound phone call
 
@@ -61,4 +67,4 @@ The app sends the business description and scenario through `conversation_initia
 2. Enter a destination phone number in E.164 format such as `+15551234567`.
 3. Click `Start call`.
 
-The backend calls ElevenLabs, which places the outbound phone call through its Twilio integration and uses the same caller prompt/scenario as the chat experience.
+The backend calls ElevenLabs, which places the outbound phone call through its Twilio integration and uses the same caller prompt/scenario as the text and voice experiences.

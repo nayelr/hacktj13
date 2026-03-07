@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice Testing Platform – Conversational Agent</title>
+    <title>Voice Testing Platform – ElevenLabs Agent</title>
     <style>
         * { box-sizing: border-box; }
         body { font-family: system-ui, sans-serif; max-width: 560px; margin: 2rem auto; padding: 0 1rem; }
@@ -12,27 +12,31 @@
         textarea { width: 100%; height: 80px; padding: 0.5rem; margin: 0.5rem 0; resize: vertical; }
         input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; }
         button { padding: 0.5rem 1rem; cursor: pointer; }
+        button:disabled { opacity: 0.7; cursor: not-allowed; }
         .error { color: #c00; font-size: 0.9rem; margin: 0.5rem 0; }
         .status { color: #1b5e20; font-size: 0.95rem; margin: 0.5rem 0; }
         .hint { color: #555; font-size: 0.85rem; margin-top: -0.1rem; }
         .section { margin-bottom: 1.5rem; }
+        #voice-section { display: none; }
+        #voice-section.active { display: block; }
         #chat-section { display: none; }
         #chat-section.active { display: block; }
+        .voice-status { padding: 0.75rem; border-radius: 8px; background: #f5f5f5; margin: 0.5rem 0; }
+        .voice-status.connected { background: #e8f5e9; }
         .messages { border: 1px solid #ddd; border-radius: 8px; min-height: 160px; max-height: 320px; overflow-y: auto; padding: 0.75rem; margin: 0.5rem 0; background: #fafafa; }
         .msg { margin: 0.5rem 0; padding: 0.5rem 0.75rem; border-radius: 8px; max-width: 90%; }
-        .msg.user { background: #e3f2fd; margin-left: 0; margin-right: auto; }
-        .msg.agent { background: #e8f5e9; margin-left: auto; margin-right: 0; }
+        .msg.user { background: #e3f2fd; margin-right: auto; }
+        .msg.agent { background: #e8f5e9; margin-left: auto; }
         .msg .role { font-size: 0.7rem; color: #666; margin-bottom: 0.25rem; }
         .chat-form { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
-        .chat-form input { flex: 1; padding: 0.5rem; }
-        .chat-form button { white-space: nowrap; }
-        .call-form { margin-top: 0.5rem; }
+        .chat-form input { flex: 1; margin: 0; }
         audio { display: block; margin-top: 0.25rem; width: 100%; max-width: 280px; }
+        .call-form { margin-top: 0.5rem; }
     </style>
 </head>
 <body>
     <h1>Voice Testing Platform</h1>
-    <p>Describe a business. The AI agent will talk to you as if you <em>are</em> the company (e.g. as a customer or caller).</p>
+    <p>Describe a business. The ElevenLabs agent can talk to you as if you <em>are</em> the company, through text chat, a live browser voice session, or an outbound phone call.</p>
 
     <div id="context-section" class="section">
         <label for="description">Business description</label>
@@ -44,24 +48,20 @@
             placeholder="e.g. check appointment availability for next Tuesday"
             value="check availability, complete a typical customer task, and avoid speaking to a human if possible"
         >
-        <button type="button" id="start-btn">Start conversation</button>
+        <button type="button" id="start-btn">Save agent context</button>
         <div id="context-error" class="error"></div>
     </div>
 
-    <div id="call-section" class="section">
-        <p><strong>Phone test</strong> – Place a live outbound call using the same caller behavior and business context.</p>
-        <form id="call-form" class="call-form">
-            <label for="phone-number">Phone number</label>
-            <input type="tel" id="phone-number" placeholder="+15551234567" autocomplete="tel">
-            <div class="hint">Use E.164 format, for example <code>+15551234567</code>.</div>
-            <button type="submit" id="call-btn">Start call</button>
-        </form>
-        <div id="call-status" class="status"></div>
-        <div id="call-error" class="error"></div>
+    <div id="voice-section" class="section">
+        <p><strong>Voice conversation</strong> – You are the company; the agent is the caller/customer. Use your microphone.</p>
+        <div id="voice-status" class="voice-status">Click below to connect.</div>
+        <button type="button" id="connect-voice-btn">Connect &amp; start speaking</button>
+        <button type="button" id="end-voice-btn" style="display:none; margin-left: 0.5rem;">End conversation</button>
+        <div id="voice-error" class="error"></div>
     </div>
 
     <div id="chat-section" class="section">
-        <p><strong>Conversation</strong> – You are the company; the agent is the caller/customer.</p>
+        <p><strong>Text conversation</strong> – You are the company; the agent is the caller/customer.</p>
         <div class="messages" id="messages"></div>
         <form id="chat-form" class="chat-form">
             <input type="text" id="user-input" placeholder="Type your reply as the company..." autocomplete="off">
@@ -70,21 +70,170 @@
         <div id="chat-error" class="error"></div>
     </div>
 
-    <script>
-        const chatSection = document.getElementById('chat-section');
+    <div id="call-section" class="section">
+        <p><strong>Phone test</strong> – Place a live outbound call using the same agent and context.</p>
+        <form id="call-form" class="call-form">
+            <label for="phone-number">Phone number</label>
+            <input type="tel" id="phone-number" placeholder="+15551234567" autocomplete="tel">
+            <div class="hint">Use E.164 format, e.g. <code>+15551234567</code>.</div>
+            <button type="submit" id="call-btn">Start call</button>
+        </form>
+        <div id="call-status" class="status"></div>
+        <div id="call-error" class="error"></div>
+    </div>
+
+    <script type="module">
         const descriptionEl = document.getElementById('description');
         const scenarioEl = document.getElementById('scenario');
         const startBtn = document.getElementById('start-btn');
         const contextError = document.getElementById('context-error');
+        const voiceSection = document.getElementById('voice-section');
+        const voiceStatus = document.getElementById('voice-status');
+        const connectVoiceBtn = document.getElementById('connect-voice-btn');
+        const endVoiceBtn = document.getElementById('end-voice-btn');
+        const voiceError = document.getElementById('voice-error');
+        const chatSection = document.getElementById('chat-section');
+        const messagesEl = document.getElementById('messages');
+        const chatForm = document.getElementById('chat-form');
+        const userInput = document.getElementById('user-input');
+        const chatError = document.getElementById('chat-error');
         const callForm = document.getElementById('call-form');
         const phoneNumberEl = document.getElementById('phone-number');
         const callBtn = document.getElementById('call-btn');
         const callStatus = document.getElementById('call-status');
         const callError = document.getElementById('call-error');
-        const messagesEl = document.getElementById('messages');
-        const chatForm = document.getElementById('chat-form');
-        const userInput = document.getElementById('user-input');
-        const chatError = document.getElementById('chat-error');
+
+        let ConversationApi = null;
+        let activeTextConversation = null;
+        let activeConversation = null;
+
+        async function getConversationApi() {
+            if (!ConversationApi) {
+                const mod = await import('https://esm.sh/@11labs/client@0.2.0');
+                ConversationApi = mod.Conversation;
+            }
+            return ConversationApi;
+        }
+
+        function extractMessageText(payload) {
+            if (!payload) return '';
+            if (typeof payload === 'string') return payload;
+            if (typeof payload.message === 'string') return payload.message;
+            if (typeof payload.text === 'string') return payload.text;
+            if (typeof payload.transcript === 'string') return payload.transcript;
+            if (typeof payload.content === 'string') return payload.content;
+            if (typeof payload.delta === 'string') return payload.delta;
+            if (Array.isArray(payload.content)) {
+                return payload.content
+                    .map((part) => typeof part === 'string' ? part : (part?.text || ''))
+                    .join('')
+                    .trim();
+            }
+            return '';
+        }
+
+        function extractMessageSource(payload) {
+            if (!payload || typeof payload === 'string') return '';
+            return String(
+                payload.source ||
+                payload.role ||
+                payload.sender ||
+                payload.type ||
+                ''
+            ).toLowerCase();
+        }
+
+        function isAgentPayload(payload) {
+            const source = extractMessageSource(payload);
+            return source.includes('agent') || source.includes('ai') || source.includes('assistant');
+        }
+
+        async function createTextConversation() {
+            const res = await fetch('/api/conversation/signed-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    description: descriptionEl.value.trim(),
+                    scenario: scenarioEl.value.trim(),
+                    text_only: true
+                })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.error || res.statusText);
+            }
+
+            const Conversation = await getConversationApi();
+            const agentMessages = [];
+            let flushTimer = null;
+            const handleAgentPayload = (payload) => {
+                const text = extractMessageText(payload);
+                if (!text || !isAgentPayload(payload)) return;
+                agentMessages.push(text);
+                if (flushTimer) window.clearTimeout(flushTimer);
+                flushTimer = window.setTimeout(flushAgentMessage, 250);
+            };
+            const handleDisconnect = () => {
+                activeTextConversation = null;
+            };
+            const handleError = (err) => {
+                chatError.textContent = err?.message || 'Text chat connection error.';
+            };
+
+            const flushAgentMessage = () => {
+                if (!agentMessages.length) return;
+                const text = agentMessages.join('').trim();
+                agentMessages.length = 0;
+                flushTimer = null;
+                if (text) appendMessage('agent', text);
+            };
+
+            const conversation = await Conversation.startSession({
+                signedUrl: data.signed_url,
+                textOnly: true,
+                overrides: {
+                    conversationConfig: data.conversation_config_override
+                },
+                onMessage: handleAgentPayload,
+                onDisconnect: handleDisconnect,
+                onError: handleError
+            });
+
+            if (typeof conversation.on === 'function') {
+                conversation.on('message', handleAgentPayload);
+                conversation.on('disconnect', handleDisconnect);
+                conversation.on('error', handleError);
+            }
+
+            return conversation;
+        }
+
+        async function ensureTextConversation() {
+            if (activeTextConversation) {
+                return activeTextConversation;
+            }
+            activeTextConversation = await createTextConversation();
+            return activeTextConversation;
+        }
+
+        function resetConversationState() {
+            if (activeConversation) {
+                activeConversation.endSession();
+                activeConversation = null;
+            }
+            if (activeTextConversation) {
+                activeTextConversation.endSession();
+                activeTextConversation = null;
+            }
+            voiceStatus.textContent = 'Ready. Click "Connect & start speaking" to talk to the agent.';
+            voiceStatus.classList.remove('connected');
+            connectVoiceBtn.style.display = 'inline-block';
+            connectVoiceBtn.disabled = false;
+            endVoiceBtn.style.display = 'none';
+            voiceError.textContent = '';
+            chatError.textContent = '';
+            messagesEl.innerHTML = '';
+        }
 
         startBtn.addEventListener('click', async () => {
             const description = descriptionEl.value.trim();
@@ -107,11 +256,116 @@
                     contextError.textContent = data.error || res.statusText;
                     return;
                 }
+                resetConversationState();
+                voiceSection.classList.add('active');
                 chatSection.classList.add('active');
-                messagesEl.innerHTML = '';
                 userInput.focus();
             } catch (err) {
                 contextError.textContent = err.message || 'Request failed.';
+            }
+        });
+
+        connectVoiceBtn.addEventListener('click', async () => {
+            voiceError.textContent = '';
+            voiceStatus.textContent = 'Connecting...';
+            connectVoiceBtn.disabled = true;
+
+            try {
+                const res = await fetch('/api/conversation/signed-url', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        description: descriptionEl.value.trim(),
+                        scenario: scenarioEl.value.trim()
+                    })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    voiceStatus.textContent = '';
+                    voiceError.textContent = data.error || res.statusText;
+                    connectVoiceBtn.disabled = false;
+                    return;
+                }
+
+                const Conversation = await getConversationApi();
+                const conversation = await Conversation.startSession({
+                    signedUrl: data.signed_url,
+                    ...(data.conversation_config_override && {
+                        overrides: { conversationConfig: data.conversation_config_override }
+                    })
+                });
+
+                activeConversation = conversation;
+                voiceStatus.textContent = 'Connected. Speak now — you are the company; the agent is the customer.';
+                voiceStatus.classList.add('connected');
+                connectVoiceBtn.style.display = 'none';
+                endVoiceBtn.style.display = 'inline-block';
+
+                conversation.on('disconnect', () => {
+                    voiceStatus.textContent = 'Disconnected.';
+                    voiceStatus.classList.remove('connected');
+                    connectVoiceBtn.style.display = 'inline-block';
+                    connectVoiceBtn.disabled = false;
+                    endVoiceBtn.style.display = 'none';
+                    activeConversation = null;
+                });
+
+                conversation.on('error', (err) => {
+                    voiceError.textContent = err?.message || 'Connection error.';
+                });
+            } catch (err) {
+                voiceStatus.textContent = '';
+                voiceError.textContent = err.message || 'Failed to start voice conversation.';
+                connectVoiceBtn.disabled = false;
+            }
+        });
+
+        endVoiceBtn.addEventListener('click', () => {
+            if (activeConversation) {
+                activeConversation.endSession();
+                activeConversation = null;
+            }
+            voiceStatus.textContent = 'Ended.';
+            voiceStatus.classList.remove('connected');
+            connectVoiceBtn.style.display = 'inline-block';
+            connectVoiceBtn.disabled = false;
+            endVoiceBtn.style.display = 'none';
+        });
+
+        function escapeHtml(s) {
+            const p = document.createElement('p');
+            p.textContent = s;
+            return p.innerHTML;
+        }
+
+        function appendMessage(role, text, audioBase64) {
+            const div = document.createElement('div');
+            div.className = 'msg ' + role;
+            div.innerHTML = '<div class="role">' + (role === 'user' ? 'You (company)' : 'Agent') + '</div><div>' + escapeHtml(text) + '</div>';
+            if (audioBase64 && role === 'agent') {
+                const aud = document.createElement('audio');
+                aud.controls = true;
+                aud.src = 'data:audio/mpeg;base64,' + audioBase64;
+                div.appendChild(aud);
+            }
+            messagesEl.appendChild(div);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = userInput.value.trim();
+            if (!message) return;
+
+            userInput.value = '';
+            chatError.textContent = '';
+            appendMessage('user', message);
+
+            try {
+                const conversation = await ensureTextConversation();
+                await conversation.sendUserMessage(message);
+            } catch (err) {
+                chatError.textContent = err.message || 'Request failed.';
             }
         });
 
@@ -163,58 +417,6 @@
             } finally {
                 callBtn.disabled = false;
                 callBtn.textContent = 'Start call';
-            }
-        });
-
-        function playBase64Audio(base64) {
-            if (!base64) return;
-            const audio = new Audio('data:audio/mpeg;base64,' + base64);
-            audio.play();
-        }
-
-        function appendMessage(role, text, audioBase64) {
-            const div = document.createElement('div');
-            div.className = 'msg ' + role;
-            div.innerHTML = '<div class="role">' + (role === 'user' ? 'You (company)' : 'Agent') + '</div><div>' + escapeHtml(text) + '</div>';
-            if (audioBase64 && role === 'agent') {
-                const aud = document.createElement('audio');
-                aud.controls = true;
-                aud.src = 'data:audio/mpeg;base64,' + audioBase64;
-                div.appendChild(aud);
-            }
-            messagesEl.appendChild(div);
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-        }
-
-        function escapeHtml(s) {
-            const p = document.createElement('p');
-            p.textContent = s;
-            return p.innerHTML;
-        }
-
-        chatForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const message = userInput.value.trim();
-            if (!message) return;
-            userInput.value = '';
-            chatError.textContent = '';
-            appendMessage('user', message, null);
-
-            try {
-                const res = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message })
-                });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) {
-                    chatError.textContent = data.error || res.statusText;
-                    return;
-                }
-                appendMessage('agent', data.text, data.audio_base64);
-                if (data.audio_base64) playBase64Audio(data.audio_base64);
-            } catch (err) {
-                chatError.textContent = err.message || 'Request failed.';
             }
         });
     </script>
