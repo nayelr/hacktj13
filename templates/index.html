@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Testing Platform</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.25rem; }
+        textarea { width: 100%; height: 80px; padding: 0.5rem; margin: 0.5rem 0; }
+        button { padding: 0.5rem 1rem; cursor: pointer; }
+        audio { display: block; margin-top: 1rem; width: 100%; }
+        .error { color: #c00; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <h1>Voice Testing Platform</h1>
+    <p>Enter text to generate AI speech (ElevenLabs):</p>
+    <form id="tts-form">
+        <textarea name="text" placeholder="e.g. I'd like to check my appointment..." required>I'd like to check my appointment please.</textarea>
+        <button type="submit">Generate Speech</button>
+    </form>
+    <div id="error" class="error"></div>
+    <audio id="audio" controls style="display:none;"></audio>
+
+    <script>
+        document.getElementById('tts-form').onsubmit = async (e) => {
+            e.preventDefault();
+            const text = e.target.text.value.trim();
+            const errEl = document.getElementById('error');
+            const audioEl = document.getElementById('audio');
+            errEl.textContent = '';
+            audioEl.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/tts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || res.statusText);
+                }
+                const blob = await res.blob();
+                audioEl.src = URL.createObjectURL(blob);
+                audioEl.style.display = 'block';
+            } catch (err) {
+                errEl.textContent = err.message || 'Something went wrong.';
+            }
+        };
+    </script>
+</body>
+</html>
