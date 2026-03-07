@@ -25,6 +25,17 @@
   --input: 20 6% 16%;
   --ring: 0 0% 98%;
   --radius: 0.5rem;
+  /* Calpen: same palette for loading + report */
+  --calpen-bg: #13110e;
+  --calpen-surface: #1a1815;
+  --calpen-border: #27272a;
+  --calpen-text: #fafafa;
+  --calpen-muted: #a1a1aa;
+  --calpen-label: #71717a;
+  --calpen-red: #f87171;
+  --calpen-green: #4ade80;
+  --calpen-blue: #60a5fa;
+  --calpen-amber: #fbbf24;
 }
 
 * {

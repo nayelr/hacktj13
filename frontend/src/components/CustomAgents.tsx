@@ -3,9 +3,9 @@
 import { Settings, FileText, Bot } from "lucide-react";
 
 const features = [
-  { icon: Settings, title: "Extremely customizable", description: "Fine-tune every nuance to match your business" },
-  { icon: FileText, title: "Auto policy writing", description: "Get started with just a transcript" },
-  { icon: Bot, title: "Built-in Copilot", description: "AI helps you build your ideal support agent" },
+  { icon: Settings, title: "One number, full map", description: "Enter a phone number and get the complete IVR tree" },
+  { icon: FileText, title: "Audit report", description: "Human necessity score, automation rate, dead ends" },
+  { icon: Bot, title: "Sequential agents", description: "AI agents explore each branch and stream results live" },
 ];
 
 export function CustomAgents() {
@@ -16,12 +16,12 @@ export function CustomAgents() {
           <div>
             <div className="flex items-center gap-2 mb-4">
               <span className="w-2 h-2 bg-orange-500 rounded-full" />
-              <span className="text-xs uppercase tracking-wider text-gray-500">Custom Agents</span>
+              <span className="text-xs uppercase tracking-wider text-gray-500">How Calpen works</span>
             </div>
             <h2 className="font-serif text-4xl md:text-5xl text-white leading-tight">
-              Built to handle
+              Built to map
               <br />
-              complexity
+              every branch
             </h2>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

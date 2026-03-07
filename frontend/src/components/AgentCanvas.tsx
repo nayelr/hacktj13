@@ -5,18 +5,18 @@ import { FileText, Image, Music, MessageSquare, Mic, Sparkles, Folder, Minus } f
 import Link from "next/link";
 
 const steps = [
-  { title: "Create the agent", description: "Ground agents in your brand standards, compliance rules, and workflows so every interaction is consistent and on-policy." },
-  { title: "Define policies", description: "" },
-  { title: "Design the logic", description: "" },
-  { title: "Test and launch", description: "" },
-  { title: "Monitor and improve", description: "" },
+  { title: "Enter phone & description", description: "Add your target number and a one-line company description, then launch the penetration test." },
+  { title: "Agents run sequentially", description: "Each agent explores one branch. Watch the call timer, live log, and IVR tree build in real time." },
+  { title: "View audit report", description: "Get human necessity score, automation rate, branches mapped, dead ends—plus clickable nodes and top friction points with transcripts." },
+  { title: "Fix friction points", description: "" },
+  { title: "Re-run and compare", description: "" },
 ];
 
 export function AgentCanvas() {
   const [activeStep, setActiveStep] = useState(0);
 
   return (
-    <section id="agent-canvas" className="bg-[#13110e] py-20 px-4">
+    <section id="how-it-works" className="bg-[#13110e] py-20 px-4">
       <div className="max-w-6xl mx-auto">
         <div className="rounded-2xl overflow-hidden bg-[#1a1815] card-gradient-border">
           <div className="p-8 pb-0">
@@ -27,13 +27,13 @@ export function AgentCanvas() {
                 <span className="w-2 h-2 bg-orange-500 rounded-sm" />
                 <span className="w-2 h-2 bg-orange-500 rounded-sm" />
               </div>
-              <span className="text-white font-medium">Agent Canvas</span>
+              <span className="text-white font-medium">Penetration test flow</span>
             </div>
             <p className="text-gray-500 text-sm mb-4 max-w-sm">
-              The fastest way to build, govern, and scale enterprise AI agents.
+              Launch a test, watch agents run sequentially, and get the full IVR tree and friction report.
             </p>
-            <Link href="#" className="inline-flex items-center gap-2 border border-gray-700 rounded-full px-4 py-2 text-sm text-white hover:bg-white/5 transition-colors">
-              Explore Agent Canvas
+            <Link href="/calpen" className="inline-flex items-center gap-2 border border-gray-700 rounded-full px-4 py-2 text-sm text-white hover:bg-white/5 transition-colors">
+              Launch test
             </Link>
           </div>
           <div className="grid md:grid-cols-2 gap-8 p-8">

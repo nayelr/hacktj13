@@ -3,10 +3,10 @@
 import { Lightbulb, ChevronDown, Plus, ArrowUp, ChevronLeft, ChevronRight, Filter, RotateCcw, Sparkles } from "lucide-react";
 
 const insights = [
-  { type: "Policy Modification", title: "Add self-service reservation modification flow", progress: 85, color: "bg-teal-500" },
-  { type: "Knowledge Gap", title: "Add FAQ and handling rules", progress: 70, color: "bg-teal-400" },
-  { type: "Policy Modification", title: "Add fallback search flow for missing confirmation", progress: 55, color: "bg-teal-500" },
-  { type: "Policy Modification", title: "Streamline unspecific transfer flow", progress: 95, color: "bg-teal-500" },
+  { type: "Friction", title: "Reschedule rejects natural date phrasing", progress: 85, color: "bg-teal-500" },
+  { type: "Gap", title: "No self-service path for account updates", progress: 70, color: "bg-teal-400" },
+  { type: "Friction", title: "Insurance verification always routes to human", progress: 55, color: "bg-teal-500" },
+  { type: "Friction", title: "Payment requires agent despite online portal", progress: 95, color: "bg-teal-500" },
 ];
 
 const steps = [

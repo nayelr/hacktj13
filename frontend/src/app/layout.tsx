@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Giga - AI Agents for Enterprise Support",
+  title: "Calpen — IVR Penetration Testing",
   description:
-    "Enterprises choose Giga for AI agents that manage complex workflows, deploy rapidly, and deliver human-like customer experiences at scale.",
+    "Find where your phone system fails. Calpen runs automated IVR penetration tests—AI agents call every branch and map friction points so you can fix them.",
 };
 
 export default function RootLayout({

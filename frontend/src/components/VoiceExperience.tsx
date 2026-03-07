@@ -1,6 +1,7 @@
 "use client";
 
 import { Volume2, VolumeX } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 
 export function VoiceExperience() {
@@ -17,14 +18,14 @@ export function VoiceExperience() {
                   <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/>
                   <path d="M12 6v6l4 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
                 </svg>
-                <span className="text-white font-medium">Voice Experience</span>
+                <span className="text-white font-medium">IVR tree map</span>
               </div>
               <p className="text-gray-400 leading-relaxed mb-6">
-                Emotionally-aware agents that understand tone, intent, and context. Fluidly handle accents, interruptions, and rapid turns of conversation to ensure every conversation feels natural.
+                Every discovered node is clickable. Expand to see menu depth, retry count, outcome, and the full transcript for that path. Green = automated, red = human transfer, yellow = partial.
               </p>
-              <a href="#" className="inline-flex items-center gap-2 border border-gray-700 rounded-full px-4 py-2 text-sm text-white hover:bg-white/5 transition-colors w-fit">
-                Explore Voice Experience
-              </a>
+              <Link href="/calpen" className="inline-flex items-center gap-2 border border-gray-700 rounded-full px-4 py-2 text-sm text-white hover:bg-white/5 transition-colors w-fit">
+                Run a test
+              </Link>
             </div>
             <div className="relative h-80 md:h-auto">
               <div

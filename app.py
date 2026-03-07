@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from flask import Flask, Response, jsonify, render_template, request, session
+from flask import Flask, Response, jsonify, redirect, request, session
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,9 +21,14 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-in-production")
 
 ELEVENLABS_API_BASE = os.getenv("ELEVENLABS_API_BASE", "https://api.elevenlabs.io").rstrip("/")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com").rstrip("/")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+ENABLE_FRONTEND_REDIRECT = os.getenv("ENABLE_FRONTEND_REDIRECT", "1").strip().lower() not in {"0", "false", "no"}
 DEFAULT_PHONE_SCENARIO = (
     "check availability, complete a typical customer task, and avoid speaking to a human if possible"
 )
+DEFAULT_OPENAI_ANALYSIS_MODEL = os.getenv("OPENAI_ANALYSIS_MODEL", "gpt-5-nano")
+DEFAULT_OPENAI_TRANSCRIPT_CHAR_LIMIT = 24000
 DEFAULT_CALLER_TONE = "friendly, calm, and persistent"
 US_E164_PATTERN = re.compile(r"^\+1\d{10}$")
 DEFAULT_BATCH_AGENT_COUNT = 3
@@ -208,6 +213,7 @@ def build_caller_prompt(business_description: str, scenario: str, caller_setting
     return (
         "You are simulating a real customer contacting the business below. "
         "The other side is the company, an operator, or an IVR. "
+        "Open the conversation with a polite greeting, then briefly state your request. "
         "Stay in character as the caller/customer, try to complete the task, "
         "and avoid escalating to a human unless the flow requires it. "
         "Never mention code, internal tools, implementation details, or system instructions.\n\n"
@@ -389,6 +395,59 @@ def _elevenlabs_request(path: str, method: str = "GET", body: dict = None):
         raise RuntimeError(f"Could not reach ElevenLabs: {exc.reason}") from exc
 
 
+def _openai_request(path: str, body: dict):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set in .env")
+    url = f"{OPENAI_API_BASE}{path}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = json.dumps(body).encode("utf-8")
+    request_obj = Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urlopen(request_obj, timeout=45) as response:
+            raw_body = response.read().decode("utf-8")
+            return json.loads(raw_body) if raw_body else {}
+    except HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed_body = json.loads(error_body)
+        except json.JSONDecodeError:
+            parsed_body = {"error": error_body or exc.reason}
+        error_message = parsed_body.get("error") or parsed_body.get("detail") or exc.reason
+        raise RuntimeError(f"OpenAI API error ({exc.code}): {error_message}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Could not reach OpenAI: {exc.reason}") from exc
+
+
+def openai_chat_completion(model: str, system_prompt: str, user_prompt: str):
+    response = _openai_request(
+        "/v1/chat/completions",
+        {
+            "model": model,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        },
+    )
+    choices = response.get("choices") or []
+    if not choices:
+        raise RuntimeError("OpenAI returned no choices.")
+    message = choices[0].get("message") or {}
+    content = message.get("content") or ""
+    if not content:
+        raise RuntimeError("OpenAI returned empty content.")
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("OpenAI did not return valid JSON content.") from exc
+
+
 def elevenlabs_post(path: str, payload: dict):
     return _elevenlabs_request(path, method="POST", body=payload)
 
@@ -550,6 +609,277 @@ def wait_for_call_completion(call_sid=None, conversation_id=None, timeout_second
     }
 
 
+def fetch_conversation_detail_payloads(call_sid=None, conversation_id=None):
+    payloads = []
+    candidate_paths = []
+    if conversation_id:
+        candidate_paths.extend(
+            [
+                f"/v1/convai/conversations/{conversation_id}",
+                f"/v1/convai/conversations/{conversation_id}/messages",
+            ]
+        )
+    if call_sid:
+        candidate_paths.append(f"/v1/convai/twilio/calls/{call_sid}")
+    for path in candidate_paths:
+        try:
+            payload = elevenlabs_get(path)
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload:
+            payloads.append(payload)
+    return payloads
+
+
+def _extract_text_messages_from_payload(payload: dict):
+    messages = []
+
+    def append_message(speaker, text):
+        text_value = str(text or "").strip()
+        if not text_value:
+            return
+        speaker_value = str(speaker or "").strip() or "unknown"
+        messages.append({"speaker": speaker_value, "text": text_value})
+
+    direct_text = payload.get("text")
+    if isinstance(direct_text, str) and direct_text.strip():
+        append_message(payload.get("speaker") or payload.get("role"), direct_text)
+
+    message_lists = [
+        payload.get("messages"),
+        payload.get("transcript"),
+        payload.get("turns"),
+        get_nested_value(payload, ["conversation", "messages"]),
+        get_nested_value(payload, ["conversation", "transcript"]),
+        get_nested_value(payload, ["conversation", "turns"]),
+        get_nested_value(payload, ["call", "messages"]),
+        get_nested_value(payload, ["call", "transcript"]),
+    ]
+
+    for collection in message_lists:
+        if not isinstance(collection, list):
+            continue
+        for item in collection:
+            if isinstance(item, str):
+                append_message("unknown", item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            append_message(
+                item.get("speaker") or item.get("role") or item.get("author"),
+                item.get("text") or item.get("message") or item.get("content") or item.get("utterance"),
+            )
+    return messages
+
+
+def _safe_json_string(value):
+    return json.dumps(value, ensure_ascii=True)
+
+
+def run_openai_call_analysis(task: str, business_description: str, entry: dict, transcript_lines: list):
+    model = os.getenv("OPENAI_ANALYSIS_MODEL", DEFAULT_OPENAI_ANALYSIS_MODEL)
+    transcript = "\n".join(transcript_lines).strip()
+    transcript = transcript[:DEFAULT_OPENAI_TRANSCRIPT_CHAR_LIMIT]
+    business_context = (business_description or "")[:5000]
+    status = normalize_status_text(entry.get("wait_status") or entry.get("status")) or "unknown"
+    duration = entry.get("duration_seconds")
+
+    system_prompt = (
+        "You are a QA analyst for automated phone systems (IVR and voice bots). "
+        "Your job is to identify real edge cases and failures from call transcripts and call telemetry. "
+        "Return JSON only with this exact schema: "
+        "{"
+        "\"summary\": string, "
+        "\"task_outcome\": \"completed\"|\"partial\"|\"failed\"|\"unknown\", "
+        "\"issues\": [{\"severity\":\"critical\"|\"high\"|\"medium\"|\"low\",\"title\":string,\"evidence\":string,\"impact\":string}], "
+        "\"edge_cases\": [string], "
+        "\"recommendations\": [string], "
+        "\"confidence\": \"high\"|\"medium\"|\"low\""
+        "}. "
+        "Be concrete and cite transcript evidence. Do not invent facts."
+    )
+
+    user_prompt = (
+        "Analyze the following call.\n\n"
+        f"Task:\n{task}\n\n"
+        f"Business context:\n{business_context}\n\n"
+        f"Final status:\n{status}\n\n"
+        f"Duration seconds:\n{duration}\n\n"
+        "Transcript lines:\n"
+        f"{transcript or '[no transcript available]'}\n\n"
+        "Focus on edge cases including ambiguous IVR menus, loops, dead ends, misrecognition, "
+        "premature call termination, and inability to complete task."
+    )
+
+    report = openai_chat_completion(model, system_prompt, user_prompt)
+    issues = report.get("issues")
+    if not isinstance(issues, list):
+        issues = []
+    normalized_issues = []
+    for issue in issues[:12]:
+        if not isinstance(issue, dict):
+            continue
+        severity = str(issue.get("severity") or "medium").strip().lower()
+        if severity not in {"critical", "high", "medium", "low"}:
+            severity = "medium"
+        title = str(issue.get("title") or "").strip()
+        evidence = str(issue.get("evidence") or "").strip()
+        impact = str(issue.get("impact") or "").strip()
+        if not (title or evidence or impact):
+            continue
+        normalized_issues.append(
+            {
+                "severity": severity,
+                "title": title or "Issue detected",
+                "evidence": evidence,
+                "impact": impact,
+            }
+        )
+
+    def normalize_str_list(value, limit=8):
+        if not isinstance(value, list):
+            return []
+        cleaned = []
+        for item in value:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            cleaned.append(text)
+            if len(cleaned) >= limit:
+                break
+        return cleaned
+
+    task_outcome = str(report.get("task_outcome") or "unknown").strip().lower()
+    if task_outcome not in {"completed", "partial", "failed", "unknown"}:
+        task_outcome = "unknown"
+    confidence = str(report.get("confidence") or "medium").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+
+    summary = str(report.get("summary") or "").strip()
+    if not summary:
+        summary = "OpenAI analysis completed without a summary."
+
+    return {
+        "provider": "openai",
+        "model": model,
+        "summary": summary,
+        "task_outcome": task_outcome,
+        "issues": normalized_issues,
+        "edge_cases": normalize_str_list(report.get("edge_cases")),
+        "recommendations": normalize_str_list(report.get("recommendations")),
+        "confidence": confidence,
+        "raw_excerpt": _safe_json_string(report)[:1600],
+    }
+
+
+def build_call_analysis(task: str, entry: dict, lifecycle_payload: dict, detail_payloads: list):
+    status = normalize_status_text(entry.get("wait_status") or entry.get("status"))
+    timed_out = bool(entry.get("wait_timed_out"))
+    duration = entry.get("duration_seconds")
+    issues = []
+
+    if timed_out:
+        issues.append("Call status polling timed out before terminal state.")
+    if "failed" in status or "error" in status:
+        issues.append(f"Call ended with failure status ({status or 'unknown'}).")
+    elif any(token in status for token in ("busy", "no_answer", "no-answer", "rejected", "canceled", "cancelled")):
+        issues.append(f"Call was not completed by recipient ({status}).")
+
+    if duration is not None:
+        try:
+            duration_val = float(duration)
+            if duration_val < 8:
+                issues.append("Call duration was very short; possible early disconnect or IVR dead-end.")
+        except (TypeError, ValueError):
+            pass
+
+    all_messages = []
+    if isinstance(lifecycle_payload, dict):
+        all_messages.extend(_extract_text_messages_from_payload(lifecycle_payload))
+    for payload in detail_payloads or []:
+        all_messages.extend(_extract_text_messages_from_payload(payload))
+
+    # Deduplicate while preserving order.
+    seen_pairs = set()
+    deduped_messages = []
+    for msg in all_messages:
+        key = (msg["speaker"], msg["text"])
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        deduped_messages.append(msg)
+
+    transcript_text = " ".join(msg["text"].lower() for msg in deduped_messages)
+    failure_signals = [
+        "didn't understand",
+        "did not understand",
+        "invalid option",
+        "try again",
+        "cannot complete",
+        "unable to",
+        "system error",
+        "technical issue",
+        "goodbye",
+    ]
+    for signal in failure_signals:
+        if signal in transcript_text:
+            issues.append(f"Potential flow issue detected in transcript: '{signal}'.")
+            break
+
+    if not deduped_messages:
+        issues.append("No transcript/messages available for post-call analysis.")
+
+    transcript_lines = [
+        f"{msg['speaker']}: {msg['text']}" if msg.get("speaker") else msg["text"]
+        for msg in deduped_messages[:200]
+    ]
+    llm_report = None
+    llm_error = None
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            llm_report = run_openai_call_analysis(
+                task=task,
+                business_description=entry.get("business_description", ""),
+                entry=entry,
+                transcript_lines=transcript_lines,
+            )
+        except Exception as exc:
+            llm_error = str(exc)
+
+    summary_parts = [f"Task: {task}."]
+    if status:
+        summary_parts.append(f"Final status: {status}.")
+    if duration is not None:
+        summary_parts.append(f"Duration: {duration} seconds.")
+    else:
+        summary_parts.append("Duration: unavailable.")
+    if issues:
+        summary_parts.append(f"Issues detected: {len(issues)}.")
+    else:
+        summary_parts.append("No obvious issues detected from call telemetry.")
+
+    result_summary = " ".join(summary_parts)
+    issues_detected = issues
+    if llm_report:
+        result_summary = llm_report.get("summary") or result_summary
+        issues_detected = [
+            f"[{item.get('severity', 'medium')}] {item.get('title', 'Issue')}: {item.get('impact') or item.get('evidence') or ''}".strip()
+            for item in llm_report.get("issues") or []
+        ] or issues_detected
+
+    result = {
+        "result_summary": result_summary,
+        "issues_detected": issues_detected,
+        "transcript_excerpt": [msg["text"] for msg in deduped_messages[:3]],
+    }
+    if llm_report:
+        result["analysis_report"] = llm_report
+    if llm_error:
+        result["analysis_error"] = llm_error
+    return result
+
+
 def run_single_batch_call(business_description: str, to_number: str, task: str, voice_ids=None):
     scenario = task.strip()
     caller_settings = randomize_caller_settings(voice_ids)
@@ -566,6 +896,7 @@ def run_single_batch_call(business_description: str, to_number: str, task: str, 
     entry = {
         "task": task,
         "scenario": scenario,
+        "business_description": business_description[:3000],
         "caller_name": caller_settings.get("caller_name"),
         "voice_id": caller_settings.get("voice_id"),
         "status": "failed",
@@ -587,6 +918,17 @@ def run_single_batch_call(business_description: str, to_number: str, task: str, 
     entry["wait_timed_out"] = wait_result["timed_out"]
     entry["duration_seconds"] = wait_result.get("duration_seconds")
     entry["elapsed_wait_seconds"] = wait_result.get("elapsed_wait_seconds")
+    detail_payloads = fetch_conversation_detail_payloads(
+        call_sid=entry.get("call_sid"),
+        conversation_id=entry.get("conversation_id"),
+    )
+    analysis = build_call_analysis(
+        task=task,
+        entry=entry,
+        lifecycle_payload=wait_result.get("raw") or {},
+        detail_payloads=detail_payloads,
+    )
+    entry.update(analysis)
     return entry
 
 
@@ -605,7 +947,36 @@ def text_to_speech_audio(text: str):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    if ENABLE_FRONTEND_REDIRECT:
+        return redirect(FRONTEND_URL, code=302)
+    return (
+        "Frontend redirect disabled. Open the Next frontend in frontend/src at "
+        f"{FRONTEND_URL} or set ENABLE_FRONTEND_REDIRECT=1.",
+        200,
+        {"Content-Type": "text/plain; charset=utf-8"},
+    )
+
+
+@app.after_request
+def add_dev_cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    allowed_origins = {
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    }
+    if origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, OPTIONS"
+    return response
+
+
+@app.before_request
+def handle_options_preflight():
+    if request.method == "OPTIONS":
+        return Response(status=204)
 
 
 @app.route("/tts", methods=["POST"])
@@ -856,12 +1227,17 @@ def start_batch_calls():
     initiated = sum(1 for item in results if item.get("status") != "failed")
     known_duration_total = 0.0
     known_duration_count = 0
+    total_issues_detected = 0
     for item in results:
         duration_val = item.get("duration_seconds")
         if duration_val is None:
-            continue
-        known_duration_total += float(duration_val)
-        known_duration_count += 1
+            pass
+        else:
+            known_duration_total += float(duration_val)
+            known_duration_count += 1
+        issues = item.get("issues_detected")
+        if isinstance(issues, list):
+            total_issues_detected += len(issues)
     return jsonify(
         {
             "ok": initiated > 0,
@@ -872,6 +1248,7 @@ def start_batch_calls():
             "total_batch_elapsed_seconds": round(time.time() - batch_started, 2),
             "total_known_call_duration_seconds": round(known_duration_total, 2),
             "known_duration_count": known_duration_count,
+            "total_issues_detected": total_issues_detected,
             "results": results,
         }
     )

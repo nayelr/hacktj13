@@ -3,9 +3,9 @@
 import { AudioLines, RefreshCw, Clock } from "lucide-react";
 
 const features = [
-  { icon: AudioLines, title: "Personalized voices", description: "Tailor your agent's voice to match your brand" },
-  { icon: RefreshCw, title: "Dynamic interrupts", description: "Designed to adapt to a global audience" },
-  { icon: Clock, title: "Ultra-low latency", description: "Industry-leading voice response time" },
+  { icon: AudioLines, title: "Live call log", description: "Streaming events per agent—dialing, connected, branch mapped" },
+  { icon: RefreshCw, title: "Sequential agents", description: "One agent per branch; next starts when the previous finishes" },
+  { icon: Clock, title: "Call timer", description: "MM:SS count-up while each agent is on call" },
 ];
 
 export function NaturalVoice() {
@@ -16,9 +16,9 @@ export function NaturalVoice() {
           <div>
             <div className="flex items-center gap-2 mb-4">
               <span className="w-2 h-2 bg-orange-500 rounded-full" />
-              <span className="text-xs uppercase tracking-wider text-gray-500">Natural Voice</span>
+              <span className="text-xs uppercase tracking-wider text-gray-500">Live run</span>
             </div>
-            <h2 className="font-serif text-4xl md:text-5xl text-white leading-tight">Engage with empathy</h2>
+            <h2 className="font-serif text-4xl md:text-5xl text-white leading-tight">Watch the scan in real time</h2>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {features.map((feature) => (

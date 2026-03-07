@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 export function CTA() {
   return (
     <section id="contact" className="relative py-32 px-4 overflow-hidden">
@@ -13,22 +15,22 @@ export function CTA() {
           <div>
             <div className="flex items-center gap-2 mb-4">
               <span className="w-2 h-2 bg-orange-500 rounded-full" />
-              <span className="text-xs uppercase tracking-wider text-gray-500">Get a Personalized Demo</span>
+              <span className="text-xs uppercase tracking-wider text-gray-500">Run your first audit</span>
             </div>
             <h2 className="font-serif text-4xl md:text-5xl text-white leading-tight">
-              Ready to see the Giga AI agent in action?
+              Ready to see where your IVR fails?
             </h2>
           </div>
           <div>
             <p className="text-gray-400 leading-relaxed mb-6">
-              Giga&apos;s AI agents handle complex workflows at scale, from live delivery issues to compliance decisions, while maintaining over 90% resolution accuracy in production.
+              Calpen runs automated penetration tests on your phone system. Get a full IVR tree map, human necessity score, and ranked friction points—no manual dialing.
             </p>
-            <a
-              href="#"
+            <Link
+              href="/calpen"
               className="inline-flex items-center gap-2 bg-white text-black rounded-full px-6 py-3 font-medium hover:bg-gray-100 transition-colors"
             >
-              Talk to us
-            </a>
+              Launch penetration test
+            </Link>
           </div>
         </div>
       </div>

@@ -3,9 +3,9 @@
 import { TrendingUp, Sparkles, Building } from "lucide-react";
 
 const features = [
-  { icon: TrendingUp, title: "Performance enhancement", description: "Designed to help you hit KPIs" },
-  { icon: Sparkles, title: "Custom suggestions", description: "Based on your unique business requirements" },
-  { icon: Building, title: "Auto improve", description: "Ready-to-implement policy improvements" },
+  { icon: TrendingUp, title: "Human necessity score", description: "See what % of paths require a human" },
+  { icon: Sparkles, title: "Top friction points", description: "Ranked list of why automation failed" },
+  { icon: Building, title: "Full transcripts", description: "Click any node or friction point for the call transcript" },
 ];
 
 export function SmartSuggestions() {
@@ -16,9 +16,9 @@ export function SmartSuggestions() {
           <div>
             <div className="flex items-center gap-2 mb-4">
               <span className="w-2 h-2 bg-orange-500 rounded-full" />
-              <span className="text-xs uppercase tracking-wider text-gray-500">Smart Suggestions</span>
+              <span className="text-xs uppercase tracking-wider text-gray-500">Audit output</span>
             </div>
-            <h2 className="font-serif text-4xl md:text-5xl text-white leading-tight">Improve as you go</h2>
+            <h2 className="font-serif text-4xl md:text-5xl text-white leading-tight">Actionable IVR insights</h2>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {features.map((feature) => (
