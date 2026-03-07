@@ -3,53 +3,220 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice Testing Platform</title>
+    <title>Voice Testing Platform – Conversational Agent</title>
     <style>
         * { box-sizing: border-box; }
-        body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 0 1rem; }
+        body { font-family: system-ui, sans-serif; max-width: 560px; margin: 2rem auto; padding: 0 1rem; }
         h1 { font-size: 1.25rem; }
-        textarea { width: 100%; height: 80px; padding: 0.5rem; margin: 0.5rem 0; }
+        label { display: block; font-weight: 600; margin-top: 0.75rem; }
+        textarea { width: 100%; height: 80px; padding: 0.5rem; margin: 0.5rem 0; resize: vertical; }
+        input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; }
         button { padding: 0.5rem 1rem; cursor: pointer; }
-        audio { display: block; margin-top: 1rem; width: 100%; }
-        .error { color: #c00; font-size: 0.9rem; }
+        .error { color: #c00; font-size: 0.9rem; margin: 0.5rem 0; }
+        .status { color: #1b5e20; font-size: 0.95rem; margin: 0.5rem 0; }
+        .hint { color: #555; font-size: 0.85rem; margin-top: -0.1rem; }
+        .section { margin-bottom: 1.5rem; }
+        #chat-section { display: none; }
+        #chat-section.active { display: block; }
+        .messages { border: 1px solid #ddd; border-radius: 8px; min-height: 160px; max-height: 320px; overflow-y: auto; padding: 0.75rem; margin: 0.5rem 0; background: #fafafa; }
+        .msg { margin: 0.5rem 0; padding: 0.5rem 0.75rem; border-radius: 8px; max-width: 90%; }
+        .msg.user { background: #e3f2fd; margin-left: 0; margin-right: auto; }
+        .msg.agent { background: #e8f5e9; margin-left: auto; margin-right: 0; }
+        .msg .role { font-size: 0.7rem; color: #666; margin-bottom: 0.25rem; }
+        .chat-form { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+        .chat-form input { flex: 1; padding: 0.5rem; }
+        .chat-form button { white-space: nowrap; }
+        .call-form { margin-top: 0.5rem; }
+        audio { display: block; margin-top: 0.25rem; width: 100%; max-width: 280px; }
     </style>
 </head>
 <body>
     <h1>Voice Testing Platform</h1>
-    <p>Enter text to generate AI speech (ElevenLabs):</p>
-    <form id="tts-form">
-        <textarea name="text" placeholder="e.g. I'd like to check my appointment..." required>I'd like to check my appointment please.</textarea>
-        <button type="submit">Generate Speech</button>
-    </form>
-    <div id="error" class="error"></div>
-    <audio id="audio" controls style="display:none;"></audio>
+    <p>Describe a business. The AI agent will talk to you as if you <em>are</em> the company (e.g. as a customer or caller).</p>
+
+    <div id="context-section" class="section">
+        <label for="description">Business description</label>
+        <textarea id="description" placeholder="e.g. A dental clinic with online booking, insurance verification, and reminder calls..."></textarea>
+        <label for="scenario">Scenario (optional)</label>
+        <input
+            type="text"
+            id="scenario"
+            placeholder="e.g. check appointment availability for next Tuesday"
+            value="check availability, complete a typical customer task, and avoid speaking to a human if possible"
+        >
+        <button type="button" id="start-btn">Start conversation</button>
+        <div id="context-error" class="error"></div>
+    </div>
+
+    <div id="call-section" class="section">
+        <p><strong>Phone test</strong> – Place a live outbound call using the same caller behavior and business context.</p>
+        <form id="call-form" class="call-form">
+            <label for="phone-number">Phone number</label>
+            <input type="tel" id="phone-number" placeholder="+15551234567" autocomplete="tel">
+            <div class="hint">Use E.164 format, for example <code>+15551234567</code>.</div>
+            <button type="submit" id="call-btn">Start call</button>
+        </form>
+        <div id="call-status" class="status"></div>
+        <div id="call-error" class="error"></div>
+    </div>
+
+    <div id="chat-section" class="section">
+        <p><strong>Conversation</strong> – You are the company; the agent is the caller/customer.</p>
+        <div class="messages" id="messages"></div>
+        <form id="chat-form" class="chat-form">
+            <input type="text" id="user-input" placeholder="Type your reply as the company..." autocomplete="off">
+            <button type="submit">Send</button>
+        </form>
+        <div id="chat-error" class="error"></div>
+    </div>
 
     <script>
-        document.getElementById('tts-form').onsubmit = async (e) => {
-            e.preventDefault();
-            const text = e.target.text.value.trim();
-            const errEl = document.getElementById('error');
-            const audioEl = document.getElementById('audio');
-            errEl.textContent = '';
-            audioEl.style.display = 'none';
+        const chatSection = document.getElementById('chat-section');
+        const descriptionEl = document.getElementById('description');
+        const scenarioEl = document.getElementById('scenario');
+        const startBtn = document.getElementById('start-btn');
+        const contextError = document.getElementById('context-error');
+        const callForm = document.getElementById('call-form');
+        const phoneNumberEl = document.getElementById('phone-number');
+        const callBtn = document.getElementById('call-btn');
+        const callStatus = document.getElementById('call-status');
+        const callError = document.getElementById('call-error');
+        const messagesEl = document.getElementById('messages');
+        const chatForm = document.getElementById('chat-form');
+        const userInput = document.getElementById('user-input');
+        const chatError = document.getElementById('chat-error');
 
+        startBtn.addEventListener('click', async () => {
+            const description = descriptionEl.value.trim();
+            contextError.textContent = '';
+            if (!description) {
+                contextError.textContent = 'Enter a business description.';
+                return;
+            }
             try {
-                const res = await fetch('/api/tts', {
+                const res = await fetch('/api/context', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text })
+                    body: JSON.stringify({
+                        description,
+                        scenario: scenarioEl.value.trim()
+                    })
                 });
+                const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
-                    const data = await res.json().catch(() => ({}));
-                    throw new Error(data.error || res.statusText);
+                    contextError.textContent = data.error || res.statusText;
+                    return;
                 }
-                const blob = await res.blob();
-                audioEl.src = URL.createObjectURL(blob);
-                audioEl.style.display = 'block';
+                chatSection.classList.add('active');
+                messagesEl.innerHTML = '';
+                userInput.focus();
             } catch (err) {
-                errEl.textContent = err.message || 'Something went wrong.';
+                contextError.textContent = err.message || 'Request failed.';
             }
-        };
+        });
+
+        callForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const description = descriptionEl.value.trim();
+            const scenario = scenarioEl.value.trim();
+            const toNumber = phoneNumberEl.value.trim();
+
+            callError.textContent = '';
+            callStatus.textContent = '';
+
+            if (!description) {
+                callError.textContent = 'Enter a business description before starting a call.';
+                return;
+            }
+            if (!toNumber) {
+                callError.textContent = 'Enter a phone number.';
+                return;
+            }
+
+            callBtn.disabled = true;
+            callBtn.textContent = 'Calling...';
+
+            try {
+                const res = await fetch('/api/call', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        business_description: description,
+                        scenario,
+                        to_number: toNumber
+                    })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    callError.textContent = data.error || res.statusText;
+                    return;
+                }
+
+                const details = [];
+                if (data.call_sid) details.push('Call SID: ' + data.call_sid);
+                if (data.conversation_id) details.push('Conversation ID: ' + data.conversation_id);
+                callStatus.textContent = details.length
+                    ? data.message + ' ' + details.join(' | ')
+                    : data.message || 'Call initiated.';
+            } catch (err) {
+                callError.textContent = err.message || 'Request failed.';
+            } finally {
+                callBtn.disabled = false;
+                callBtn.textContent = 'Start call';
+            }
+        });
+
+        function playBase64Audio(base64) {
+            if (!base64) return;
+            const audio = new Audio('data:audio/mpeg;base64,' + base64);
+            audio.play();
+        }
+
+        function appendMessage(role, text, audioBase64) {
+            const div = document.createElement('div');
+            div.className = 'msg ' + role;
+            div.innerHTML = '<div class="role">' + (role === 'user' ? 'You (company)' : 'Agent') + '</div><div>' + escapeHtml(text) + '</div>';
+            if (audioBase64 && role === 'agent') {
+                const aud = document.createElement('audio');
+                aud.controls = true;
+                aud.src = 'data:audio/mpeg;base64,' + audioBase64;
+                div.appendChild(aud);
+            }
+            messagesEl.appendChild(div);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function escapeHtml(s) {
+            const p = document.createElement('p');
+            p.textContent = s;
+            return p.innerHTML;
+        }
+
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = userInput.value.trim();
+            if (!message) return;
+            userInput.value = '';
+            chatError.textContent = '';
+            appendMessage('user', message, null);
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    chatError.textContent = data.error || res.statusText;
+                    return;
+                }
+                appendMessage('agent', data.text, data.audio_base64);
+                if (data.audio_base64) playBase64Audio(data.audio_base64);
+            } catch (err) {
+                chatError.textContent = err.message || 'Request failed.';
+            }
+        });
     </script>
 </body>
 </html>
