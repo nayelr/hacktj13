@@ -10,13 +10,17 @@
         h1 { font-size: 1.25rem; }
         label { display: block; font-weight: 600; margin-top: 0.75rem; }
         textarea { width: 100%; height: 80px; padding: 0.5rem; margin: 0.5rem 0; resize: vertical; }
-        input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; }
+        input, select { width: 100%; padding: 0.5rem; margin: 0.5rem 0; }
         button { padding: 0.5rem 1rem; cursor: pointer; }
         button:disabled { opacity: 0.7; cursor: not-allowed; }
         .error { color: #c00; font-size: 0.9rem; margin: 0.5rem 0; }
         .status { color: #1b5e20; font-size: 0.95rem; margin: 0.5rem 0; }
         .hint { color: #555; font-size: 0.85rem; margin-top: -0.1rem; }
         .section { margin-bottom: 1.5rem; }
+        .card { border: 1px solid #ddd; border-radius: 10px; padding: 1rem; background: #fcfcfc; }
+        .control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 0.75rem; }
+        .slider-value { color: #555; font-size: 0.85rem; margin-top: -0.25rem; }
+        .subheading { font-size: 0.95rem; margin: 0 0 0.25rem; }
         #voice-section { display: none; }
         #voice-section.active { display: block; }
         #chat-section { display: none; }
@@ -48,6 +52,45 @@
             placeholder="e.g. check appointment availability for next Tuesday"
             value="check availability, complete a typical customer task, and avoid speaking to a human if possible"
         >
+        <div class="card">
+            <p class="subheading"><strong>Caller Controls</strong></p>
+            <div class="control-grid">
+                <div>
+                    <label for="voice-select">Agent voice</label>
+                    <select id="voice-select"></select>
+                </div>
+                <div>
+                    <label for="caller-name">Caller name</label>
+                    <input type="text" id="caller-name" placeholder="e.g. Maya Thompson">
+                </div>
+                <div>
+                    <label for="stability">Voice stability</label>
+                    <input type="range" id="stability" min="0" max="1" step="0.05">
+                    <div class="slider-value" id="stability-value"></div>
+                </div>
+                <div>
+                    <label for="speed">Speaking speed</label>
+                    <input type="range" id="speed" min="0.7" max="1.2" step="0.05">
+                    <div class="slider-value" id="speed-value"></div>
+                </div>
+                <div>
+                    <label for="similarity-boost">Voice similarity</label>
+                    <input type="range" id="similarity-boost" min="0" max="1" step="0.05">
+                    <div class="slider-value" id="similarity-boost-value"></div>
+                </div>
+                <div>
+                    <label for="caller-tone">Caller tone</label>
+                    <input type="text" id="caller-tone" value="friendly, calm, and persistent">
+                </div>
+            </div>
+            <label for="caller-persona">Caller persona</label>
+            <textarea id="caller-persona" placeholder="e.g. A busy parent calling during a lunch break who wants a fast answer.">A practical customer who wants to complete a real task efficiently.</textarea>
+            <label for="opening-line">Opening line (optional)</label>
+            <input type="text" id="opening-line" placeholder="e.g. Hi, this is Maya. I’m trying to book a cleaning for next week.">
+            <label for="additional-instructions">Extra caller instructions</label>
+            <textarea id="additional-instructions" placeholder="e.g. If they offer multiple times, prefer afternoons and ask one follow-up question before confirming."></textarea>
+            <div id="voice-load-error" class="error"></div>
+        </div>
         <button type="button" id="start-btn">Save agent context</button>
         <div id="context-error" class="error"></div>
     </div>
@@ -85,6 +128,19 @@
     <script type="module">
         const descriptionEl = document.getElementById('description');
         const scenarioEl = document.getElementById('scenario');
+        const voiceSelectEl = document.getElementById('voice-select');
+        const callerNameEl = document.getElementById('caller-name');
+        const callerPersonaEl = document.getElementById('caller-persona');
+        const callerToneEl = document.getElementById('caller-tone');
+        const openingLineEl = document.getElementById('opening-line');
+        const additionalInstructionsEl = document.getElementById('additional-instructions');
+        const stabilityEl = document.getElementById('stability');
+        const speedEl = document.getElementById('speed');
+        const similarityBoostEl = document.getElementById('similarity-boost');
+        const stabilityValueEl = document.getElementById('stability-value');
+        const speedValueEl = document.getElementById('speed-value');
+        const similarityBoostValueEl = document.getElementById('similarity-boost-value');
+        const voiceLoadErrorEl = document.getElementById('voice-load-error');
         const startBtn = document.getElementById('start-btn');
         const contextError = document.getElementById('context-error');
         const voiceSection = document.getElementById('voice-section');
@@ -106,6 +162,68 @@
         let ConversationApi = null;
         let activeTextConversation = null;
         let activeConversation = null;
+
+        function updateSliderLabels() {
+            stabilityValueEl.textContent = 'Current: ' + stabilityEl.value;
+            speedValueEl.textContent = 'Current: ' + speedEl.value + 'x';
+            similarityBoostValueEl.textContent = 'Current: ' + similarityBoostEl.value;
+        }
+
+        function collectContextPayload() {
+            return {
+                description: descriptionEl.value.trim(),
+                scenario: scenarioEl.value.trim(),
+                voice_id: voiceSelectEl.value,
+                caller_name: callerNameEl.value.trim(),
+                caller_persona: callerPersonaEl.value.trim(),
+                caller_tone: callerToneEl.value.trim(),
+                opening_line: openingLineEl.value.trim(),
+                additional_instructions: additionalInstructionsEl.value.trim(),
+                stability: Number(stabilityEl.value),
+                speed: Number(speedEl.value),
+                similarity_boost: Number(similarityBoostEl.value),
+            };
+        }
+
+        function applyVoiceDefaults(defaults) {
+            if (!defaults) return;
+            if (defaults.voice_id) {
+                voiceSelectEl.value = defaults.voice_id;
+            }
+            if (defaults.stability !== undefined && defaults.stability !== null) {
+                stabilityEl.value = defaults.stability;
+            }
+            if (defaults.speed !== undefined && defaults.speed !== null) {
+                speedEl.value = defaults.speed;
+            }
+            if (defaults.similarity_boost !== undefined && defaults.similarity_boost !== null) {
+                similarityBoostEl.value = defaults.similarity_boost;
+            }
+            updateSliderLabels();
+        }
+
+        async function loadVoices() {
+            voiceLoadErrorEl.textContent = '';
+            try {
+                const res = await fetch('/api/voices');
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    voiceLoadErrorEl.textContent = data.error || res.statusText;
+                    return;
+                }
+                voiceSelectEl.innerHTML = '';
+                for (const voice of data.voices || []) {
+                    const option = document.createElement('option');
+                    const accent = voice.labels?.accent ? ' - ' + voice.labels.accent : '';
+                    option.value = voice.voice_id;
+                    option.textContent = voice.name + (voice.category ? ' (' + voice.category + ')' : '') + accent;
+                    voiceSelectEl.appendChild(option);
+                }
+                applyVoiceDefaults(data.defaults || {});
+            } catch (err) {
+                voiceLoadErrorEl.textContent = err.message || 'Failed to load voices.';
+            }
+        }
 
         async function getConversationApi() {
             if (!ConversationApi) {
@@ -153,8 +271,7 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    description: descriptionEl.value.trim(),
-                    scenario: scenarioEl.value.trim(),
+                    ...collectContextPayload(),
                     text_only: true
                 })
             });
@@ -246,10 +363,7 @@
                 const res = await fetch('/api/context', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        description,
-                        scenario: scenarioEl.value.trim()
-                    })
+                    body: JSON.stringify(collectContextPayload())
                 });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
@@ -274,10 +388,7 @@
                 const res = await fetch('/api/conversation/signed-url', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        description: descriptionEl.value.trim(),
-                        scenario: scenarioEl.value.trim()
-                    })
+                    body: JSON.stringify(collectContextPayload())
                 });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
@@ -395,6 +506,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
+                        ...collectContextPayload(),
                         business_description: description,
                         scenario,
                         to_number: toNumber
@@ -419,6 +531,13 @@
                 callBtn.textContent = 'Start call';
             }
         });
+
+        stabilityEl.addEventListener('input', updateSliderLabels);
+        speedEl.addEventListener('input', updateSliderLabels);
+        similarityBoostEl.addEventListener('input', updateSliderLabels);
+
+        updateSliderLabels();
+        loadVoices();
     </script>
 </body>
 </html>

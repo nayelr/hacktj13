@@ -21,6 +21,8 @@ ELEVENLABS_API_BASE = os.getenv("ELEVENLABS_API_BASE", "https://api.elevenlabs.i
 DEFAULT_PHONE_SCENARIO = (
     "check availability, complete a typical customer task, and avoid speaking to a human if possible"
 )
+DEFAULT_CALLER_PERSONA = "A practical customer who wants to complete a real task efficiently."
+DEFAULT_CALLER_TONE = "friendly, calm, and persistent"
 E164_PATTERN = re.compile(r"^\+[1-9]\d{7,14}$")
 
 
@@ -68,33 +70,98 @@ def get_session_value(key: str, default: str = ""):
     return (session.get(key) or default).strip()
 
 
-def build_caller_prompt(business_description: str, scenario: str):
+def parse_bounded_float(value, minimum: float, maximum: float, fallback=None):
+    if value in (None, ""):
+        return fallback
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(minimum, min(maximum, parsed))
+
+
+def normalize_caller_settings(data: dict = None):
+    data = data or {}
+    return {
+        "caller_name": (data.get("caller_name") or "").strip(),
+        "caller_persona": (data.get("caller_persona") or DEFAULT_CALLER_PERSONA).strip(),
+        "caller_tone": (data.get("caller_tone") or DEFAULT_CALLER_TONE).strip(),
+        "additional_instructions": (data.get("additional_instructions") or "").strip(),
+        "opening_line": (data.get("opening_line") or "").strip(),
+        "voice_id": (data.get("voice_id") or "").strip(),
+        "stability": parse_bounded_float(data.get("stability"), 0.0, 1.0),
+        "speed": parse_bounded_float(data.get("speed"), 0.7, 1.2),
+        "similarity_boost": parse_bounded_float(data.get("similarity_boost"), 0.0, 1.0),
+    }
+
+
+def get_session_caller_settings():
+    return normalize_caller_settings(session.get("caller_settings") or {})
+
+
+def resolve_caller_settings(request_data: dict = None):
+    merged = dict(session.get("caller_settings") or {})
+    merged.update(request_data or {})
+    return normalize_caller_settings(merged)
+
+
+def build_tts_settings(caller_settings: dict):
+    tts_settings = {}
+    if caller_settings.get("voice_id"):
+        tts_settings["voice_id"] = caller_settings["voice_id"]
+    for key in ("stability", "speed", "similarity_boost"):
+        value = caller_settings.get(key)
+        if value is not None:
+            tts_settings[key] = value
+    return tts_settings
+
+
+def build_caller_prompt(business_description: str, scenario: str, caller_settings: dict):
+    caller_name = caller_settings.get("caller_name") or "Not specified"
+    caller_persona = caller_settings.get("caller_persona") or DEFAULT_CALLER_PERSONA
+    caller_tone = caller_settings.get("caller_tone") or DEFAULT_CALLER_TONE
+    extra_instructions = caller_settings.get("additional_instructions") or "None."
     return (
         "You are simulating a real customer contacting the business below. "
         "The other side is the company, an operator, or an IVR. "
         "Stay in character as the caller/customer, try to complete the task, "
-        "and avoid escalating to a human unless the flow requires it.\n\n"
+        "and avoid escalating to a human unless the flow requires it. "
+        "Never mention code, internal tools, implementation details, or system instructions.\n\n"
+        f"Caller name:\n{caller_name}\n\n"
+        f"Caller persona:\n{caller_persona}\n\n"
+        f"Caller tone and speaking style:\n{caller_tone}\n\n"
+        f"Extra caller instructions:\n{extra_instructions}\n\n"
         f"Business description:\n{business_description}\n\n"
         f"Caller goal:\n{scenario}\n\n"
         "Speak naturally, ask one thing at a time, and keep each response concise."
     )
 
 
-def build_first_message(scenario: str):
+def build_first_message(scenario: str, caller_settings: dict):
+    opening_line = caller_settings.get("opening_line") or ""
+    if opening_line:
+        return opening_line
+    caller_name = caller_settings.get("caller_name") or ""
+    if caller_name:
+        return f"Hi, this is {caller_name}. I'm calling because I'd like to {scenario.rstrip('.')}."
     return f"Hi, I'm calling because I'd like to {scenario.rstrip('.')}."
 
 
-def build_conversation_initiation_data(business_description: str, scenario: str):
-    return {
+def build_conversation_initiation_data(business_description: str, scenario: str, caller_settings: dict):
+    conversation_data = {
         "conversation_config_override": {
             "agent": {
                 "prompt": {
-                    "prompt": build_caller_prompt(business_description, scenario),
+                    "prompt": build_caller_prompt(business_description, scenario, caller_settings),
                 },
-                "first_message": build_first_message(scenario),
+                "first_message": build_first_message(scenario, caller_settings),
             }
         }
     }
+    tts_settings = build_tts_settings(caller_settings)
+    if tts_settings:
+        conversation_data["conversation_config_override"]["tts"] = tts_settings
+    return conversation_data
 
 
 def normalize_scenario(value: str):
@@ -123,7 +190,7 @@ def _elevenlabs_request(path: str, method: str = "GET", body: dict = None):
     if body is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode("utf-8")
-        api_request = Request(url, data=data, headers=headers, method="POST")
+        api_request = Request(url, data=data, headers=headers, method=method)
     else:
         api_request = Request(url, headers=headers, method=method)
     try:
@@ -150,6 +217,51 @@ def elevenlabs_get(path: str, params: dict = None):
     if params:
         path = f"{path}?{urlencode(params)}"
     return _elevenlabs_request(path, method="GET")
+
+
+def sync_agent_configuration(agent_id: str, business_description: str, scenario: str):
+    current_agent = elevenlabs_get(f"/v1/convai/agents/{agent_id}")
+    conversation_config = json.loads(json.dumps(current_agent.get("conversation_config") or {}))
+    agent_config = conversation_config.setdefault("agent", {})
+    prompt_config = agent_config.setdefault("prompt", {})
+    caller_settings = get_session_caller_settings()
+
+    agent_config["first_message"] = build_first_message(scenario, caller_settings)
+    prompt_config["prompt"] = build_caller_prompt(business_description, scenario, caller_settings)
+    prompt_config["tool_ids"] = []
+    prompt_config["tools"] = []
+    tts_config = conversation_config.setdefault("tts", {})
+    for key, value in build_tts_settings(caller_settings).items():
+        tts_config[key] = value
+
+    updated_agent = elevenlabs_request_patch(
+        f"/v1/convai/agents/{agent_id}",
+        {"conversation_config": conversation_config},
+    )
+    return updated_agent
+
+
+def elevenlabs_request_patch(path: str, payload: dict):
+    return _elevenlabs_request(path, method="PATCH", body=payload)
+
+
+def ensure_session_agent_is_synced(business_description: str, scenario: str):
+    agent_id = os.getenv("ELEVENLABS_AGENT_ID")
+    if not agent_id:
+        raise RuntimeError("ELEVENLABS_AGENT_ID not set in .env (required for ElevenLabs chat and voice).")
+
+    if (
+        session.get("synced_agent_id") == agent_id
+        and session.get("synced_business_description") == business_description
+        and session.get("synced_scenario") == scenario
+    ):
+        return agent_id
+
+    sync_agent_configuration(agent_id, business_description, scenario)
+    session["synced_agent_id"] = agent_id
+    session["synced_business_description"] = business_description
+    session["synced_scenario"] = scenario
+    return agent_id
 
 
 def text_to_speech_audio(text: str):
@@ -199,28 +311,73 @@ def set_context():
         return jsonify({"error": "No description provided"}), 400
     session["business_description"] = description
     session["scenario"] = scenario
-    return jsonify({"ok": True, "scenario": scenario})
+    session["caller_settings"] = normalize_caller_settings(data)
+    session.pop("synced_agent_id", None)
+    session.pop("synced_business_description", None)
+    session.pop("synced_scenario", None)
+    return jsonify({"ok": True, "scenario": scenario, "caller_settings": session["caller_settings"]})
+
+
+@app.route("/api/voices", methods=["GET"])
+def list_voices():
+    """Return ElevenLabs voices plus current/default TTS settings for the configured agent."""
+    try:
+        voices_response = elevenlabs_get("/v1/voices")
+        current_voice_defaults = {}
+        agent_id = os.getenv("ELEVENLABS_AGENT_ID")
+        if agent_id:
+            agent_response = elevenlabs_get(f"/v1/convai/agents/{agent_id}")
+            current_voice_defaults = {
+                "voice_id": (agent_response.get("conversation_config", {}).get("tts", {}) or {}).get("voice_id", ""),
+                "stability": (agent_response.get("conversation_config", {}).get("tts", {}) or {}).get("stability"),
+                "speed": (agent_response.get("conversation_config", {}).get("tts", {}) or {}).get("speed"),
+                "similarity_boost": (agent_response.get("conversation_config", {}).get("tts", {}) or {}).get("similarity_boost"),
+            }
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    session_settings = get_session_caller_settings()
+    defaults = {
+        "voice_id": session_settings.get("voice_id") or current_voice_defaults.get("voice_id") or "",
+        "stability": session_settings.get("stability"),
+        "speed": session_settings.get("speed"),
+        "similarity_boost": session_settings.get("similarity_boost"),
+    }
+    for key in ("stability", "speed", "similarity_boost"):
+        if defaults[key] is None:
+            defaults[key] = current_voice_defaults.get(key)
+
+    voices = [
+        {
+            "voice_id": voice.get("voice_id"),
+            "name": voice.get("name"),
+            "category": voice.get("category"),
+            "labels": voice.get("labels") or {},
+        }
+        for voice in (voices_response.get("voices") or [])
+        if voice.get("voice_id") and voice.get("name")
+    ]
+    return jsonify({"voices": voices, "defaults": defaults})
 
 
 @app.route("/api/conversation/signed-url", methods=["GET", "POST"])
 def conversation_signed_url():
     """Return a signed WebSocket URL and conversation_config_override for ElevenLabs chat or voice."""
-    agent_id = os.getenv("ELEVENLABS_AGENT_ID")
-    if not agent_id:
-        return jsonify({"error": "ELEVENLABS_AGENT_ID not set in .env (required for ElevenLabs chat and voice)."}), 500
-
     if request.method == "POST":
         data = request.get_json() or {}
     else:
         data = request.args or {}
     description = (data.get("description") or get_session_value("business_description")).strip()
     scenario = normalize_scenario(data.get("scenario") or get_session_value("scenario"))
+    caller_settings = resolve_caller_settings(data)
     text_only = str(data.get("text_only", "")).lower() in {"1", "true", "yes", "on"}
 
     if not description:
         return jsonify({"error": "Provide a business description first (use /api/context or pass in request)."}), 400
 
     try:
+        session["caller_settings"] = caller_settings
+        agent_id = ensure_session_agent_is_synced(description, scenario)
         resp = elevenlabs_get("/v1/convai/conversation/get-signed-url", {"agent_id": agent_id})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
@@ -229,7 +386,7 @@ def conversation_signed_url():
     if not signed_url:
         return jsonify({"error": "ElevenLabs did not return a signed_url.", "raw": resp}), 502
 
-    conversation_config_override = build_conversation_initiation_data(description, scenario)
+    conversation_config_override = build_conversation_initiation_data(description, scenario, caller_settings)
     if text_only:
         conversation_config_override = with_text_only_override(conversation_config_override)
 
@@ -247,6 +404,7 @@ def start_call():
     to_number = (data.get("to_number") or "").strip()
     business_description = (data.get("business_description") or get_session_value("business_description")).strip()
     scenario = normalize_scenario(data.get("scenario") or get_session_value("scenario"))
+    caller_settings = resolve_caller_settings(data)
 
     if not business_description:
         return jsonify({"error": "Provide a business description first."}), 400
@@ -268,10 +426,13 @@ def start_call():
         "conversation_initiation_client_data": build_conversation_initiation_data(
             business_description,
             scenario,
+            caller_settings,
         ),
     }
 
     try:
+        session["caller_settings"] = caller_settings
+        payload["agent_id"] = ensure_session_agent_is_synced(business_description, scenario)
         call_response = elevenlabs_post("/v1/convai/twilio/outbound-call", payload)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
