@@ -1,713 +1,155 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navbar } from "@/components/Navbar";
 
-const AGENT_SEQUENCE = [
-  {
-    id: "AGT-01",
-    goal: "Explore appointments branch",
-    duration: 3000,
-    logs: [
-      { t: 300, cls: "info", text: "Dialing target IVR..." },
-      { t: 800, cls: "ok", text: "Connected — greeting detected" },
-      { t: 1200, cls: "info", text: 'Said "appointments"' },
-      { t: 1800, cls: "ok", text: "Entered appointments branch" },
-      { t: 2200, cls: "info", text: "Found 3 sub-options" },
-      { t: 2800, cls: "ok", text: "Branch mapped — 3 nodes discovered" },
-    ],
-    nodes: [
-      { indent: 0, dot: "blue", label: "Main Menu", meta: "Greeting — 5 options detected" },
-      { indent: 1, dot: "yellow", label: "1 — Appointments", meta: "3 sub-branches found" },
-      { indent: 2, dot: "green", label: "1.1 Schedule New", meta: "Automated ✓" },
-      { indent: 2, dot: "red", label: "1.2 Reschedule", meta: "Human transfer ✗" },
-      { indent: 2, dot: "green", label: "1.3 Cancel", meta: "Automated ✓" },
-    ],
-  },
-  {
-    id: "AGT-02",
-    goal: "Explore billing branch",
-    duration: 3200,
-    logs: [
-      { t: 200, cls: "info", text: "Dialing target IVR..." },
-      { t: 700, cls: "ok", text: "Connected" },
-      { t: 1100, cls: "info", text: 'Said "billing"' },
-      { t: 1600, cls: "ok", text: "Entered billing branch" },
-      { t: 2100, cls: "err", text: "Payment node — human transfer detected" },
-      { t: 2600, cls: "err", text: "Insurance node — human transfer detected" },
-      { t: 3000, cls: "ok", text: "Branch mapped — 3 nodes" },
-    ],
-    nodes: [
-      { indent: 1, dot: "red", label: "2 — Billing", meta: "2 of 3 paths escalate to human" },
-      { indent: 2, dot: "green", label: "2.1 Check Balance", meta: "Automated ✓" },
-      { indent: 2, dot: "red", label: "2.2 Make Payment", meta: "Human transfer ✗" },
-      { indent: 2, dot: "red", label: "2.3 Insurance Verify", meta: "Human transfer ✗" },
-    ],
-  },
-  {
-    id: "AGT-03",
-    goal: "Explore office hours branch",
-    duration: 1800,
-    logs: [
-      { t: 200, cls: "info", text: "Dialing target IVR..." },
-      { t: 600, cls: "ok", text: "Connected" },
-      { t: 900, cls: "info", text: 'Said "office hours"' },
-      { t: 1300, cls: "ok", text: "Static recording — terminal node" },
-      { t: 1600, cls: "ok", text: "Branch complete" },
-    ],
-    nodes: [
-      { indent: 1, dot: "green", label: "3 — Office Hours", meta: "Static recording — no escalation ✓" },
-    ],
-  },
-  {
-    id: "AGT-04",
-    goal: "Explore account updates branch",
-    duration: 2400,
-    logs: [
-      { t: 200, cls: "info", text: "Dialing target IVR..." },
-      { t: 600, cls: "ok", text: "Connected" },
-      { t: 1000, cls: "info", text: 'Said "account updates"' },
-      { t: 1400, cls: "warn", text: "IVR did not recognize intent" },
-      { t: 1800, cls: "err", text: "No path found — complete gap in IVR" },
-      { t: 2200, cls: "err", text: "Escalated to human immediately" },
-    ],
-    nodes: [
-      { indent: 1, dot: "red", label: "4 — Account Updates", meta: "No path — complete gap ✗" },
-    ],
-  },
-];
-
-type ReportNode = {
-  id: string;
-  label: string;
-  status: string;
-  meta: string;
-  depth: number;
-  retries: number;
-  outcome: string;
-  transcript: { role: string; text: string; fail?: boolean }[];
-  children?: ReportNode[];
+type RunConfig = {
+  phone: string;
+  description: string;
+  websiteUrl: string;
+  numAgents: number;
+  tasks: string[];
 };
 
-const REPORT_TREE: ReportNode[] = [
-  {
-    id: "main",
-    label: "Main Menu",
-    status: "info",
-    meta: "4 branches discovered",
-    depth: 1,
-    retries: 0,
-    outcome: "Routing node",
-    transcript: [
-      { role: "ivr", text: "Thank you for calling Smile Dental. How can I help you today?" },
-      { role: "agent", text: "Appointments." },
-    ],
-    children: [
-      {
-        id: "appt",
-        label: "1 — Appointments",
-        status: "warn",
-        meta: "Partial — 1 of 3 paths escalates",
-        depth: 2,
-        retries: 0,
-        outcome: "Partial automation",
-        transcript: [
-          { role: "ivr", text: "For appointments: say schedule, reschedule, or cancel." },
-          { role: "agent", text: "Reschedule." },
-        ],
-        children: [
-          {
-            id: "schedule",
-            label: "1.1 Schedule New",
-            status: "ok",
-            meta: "Fully automated",
-            depth: 3,
-            retries: 0,
-            outcome: "Task completed by IVR",
-            transcript: [
-              { role: "ivr", text: "What date would you like your appointment?" },
-              { role: "agent", text: "January tenth." },
-              { role: "ivr", text: "Appointment scheduled for January 10th. Goodbye." },
-            ],
-          },
-          {
-            id: "reschedule",
-            label: "1.2 Reschedule",
-            status: "fail",
-            meta: "Human transfer — phrasing failure",
-            depth: 3,
-            retries: 4,
-            outcome: "Escalated to human at depth 3",
-            transcript: [
-              { role: "ivr", text: "Please say your preferred appointment date." },
-              { role: "agent", text: "Next Tuesday the fifteenth." },
-              { role: "ivr", text: "I'm sorry, I didn't understand. Please say a date like January first." },
-              { role: "agent", text: "January fifteen." },
-              { role: "ivr", text: "I'm having trouble understanding. Transferring to a representative.", fail: true },
-            ],
-          },
-          {
-            id: "cancel",
-            label: "1.3 Cancel",
-            status: "ok",
-            meta: "Fully automated",
-            depth: 3,
-            retries: 0,
-            outcome: "Task completed by IVR",
-            transcript: [
-              { role: "ivr", text: "Please say your name and appointment date to cancel." },
-              { role: "agent", text: "John Smith, January tenth." },
-              { role: "ivr", text: "Appointment cancelled. Goodbye." },
-            ],
-          },
-        ],
-      },
-      {
-        id: "billing",
-        label: "2 — Billing",
-        status: "fail",
-        meta: "2 of 3 paths escalate",
-        depth: 2,
-        retries: 0,
-        outcome: "Mostly human-dependent",
-        transcript: [
-          { role: "ivr", text: "For billing: say balance, payment, or insurance." },
-          { role: "agent", text: "Payment." },
-        ],
-        children: [
-          {
-            id: "balance",
-            label: "2.1 Check Balance",
-            status: "ok",
-            meta: "Automated",
-            depth: 3,
-            retries: 0,
-            outcome: "Balance read aloud by IVR",
-            transcript: [
-              { role: "ivr", text: "Please say your 6-digit account number." },
-              { role: "agent", text: "One two three four five six." },
-              { role: "ivr", text: "Your current balance is $240. Goodbye." },
-            ],
-          },
-          {
-            id: "payment",
-            label: "2.2 Make Payment",
-            status: "fail",
-            meta: "Human transfer",
-            depth: 3,
-            retries: 1,
-            outcome: "IVR not connected to payment system",
-            transcript: [{ role: "ivr", text: "For payment processing please hold for a representative.", fail: true }],
-          },
-          {
-            id: "insurance",
-            label: "2.3 Insurance Verify",
-            status: "fail",
-            meta: "Human transfer",
-            depth: 3,
-            retries: 0,
-            outcome: "No self-service insurance lookup",
-            transcript: [{ role: "ivr", text: "Insurance verification requires a specialist. Transferring now.", fail: true }],
-          },
-        ],
-      },
-      {
-        id: "hours",
-        label: "3 — Office Hours",
-        status: "ok",
-        meta: "Automated — static recording",
-        depth: 2,
-        retries: 0,
-        outcome: "Info delivered, no escalation",
-        transcript: [{ role: "ivr", text: "We are open Monday through Friday 8am to 6pm. Goodbye." }],
-      },
-      {
-        id: "account",
-        label: "4 — Account Updates",
-        status: "fail",
-        meta: "No path — complete gap",
-        depth: 2,
-        retries: 2,
-        outcome: "IVR has no account update flow",
-        transcript: [
-          { role: "ivr", text: "I didn't understand. How can I help you?" },
-          { role: "agent", text: "Update my account information." },
-          { role: "ivr", text: "I'm sorry, I can't help with that. Transferring to a representative.", fail: true },
-        ],
-      },
-    ],
-  },
-];
-
-const FRICTION_POINTS = [
-  {
-    id: "f1",
-    rank: "01",
-    severity: "high",
-    count: 34,
-    label: "Reschedule rejects natural date phrasing",
-    sub: "Node 1.2 · Depth 3 · 4 retries before escalation",
-    nodeId: "reschedule",
-    path: ["Main Menu", "Appointments", "1.2 Reschedule", "❌ Human Transfer"],
-  },
-  {
-    id: "f2",
-    rank: "02",
-    severity: "high",
-    count: 28,
-    label: "No self-service path for account updates",
-    sub: "Node 4 · Complete gap — task not supported",
-    nodeId: "account",
-    path: ["Main Menu", "4 — Account Updates", "❌ No Path Found"],
-  },
-  {
-    id: "f3",
-    rank: "03",
-    severity: "high",
-    count: 22,
-    label: "Insurance verification always routes to human",
-    sub: "Node 2.3 · Automatable with basic lookup integration",
-    nodeId: "insurance",
-    path: ["Main Menu", "Billing", "2.3 Insurance Verify", "❌ Human Transfer"],
-  },
-  {
-    id: "f4",
-    rank: "04",
-    severity: "medium",
-    count: 17,
-    label: "Payment requires agent despite online portal",
-    sub: "Node 2.2 · IVR not connected to payment system",
-    nodeId: "payment",
-    path: ["Main Menu", "Billing", "2.2 Make Payment", "❌ Human Transfer"],
-  },
-];
-
-const TOP_LEVEL_METRICS = {
-  humanNecessityScore: 67,
-  automationRate: 33,
-  branchesMapped: 11,
-  deadEndsFound: 4,
-};
-
-const C = {
-  bg: "#13110e",
-  surface: "#1a1815",
-  card: "#1a1815",
-  border: "#27272a",
-  accent: "#60a5fa",
-  accent2: "#60a5fa",
-  red: "#f87171",
-  green: "#4ade80",
-  yellow: "#fbbf24",
-  text: "#fafafa",
-  sub: "#a1a1aa",
-};
-const dotColor = (d: string) =>
-  ({ green: C.green, red: C.red, yellow: C.yellow, blue: C.accent2 }[d] || C.sub);
-
-function Label({ text }: { text: string }) {
-  return (
-    <div className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-3">
-      {text}
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const m: Record<string, { bg: string; c: string; t: string }> = {
-    ok: { bg: "#10b98118", c: C.green, t: "Automated" },
-    warn: { bg: "#f59e0b18", c: C.yellow, t: "Partial" },
-    fail: { bg: "#f43f5e18", c: C.red, t: "Escalated" },
-    info: { bg: "#4f46e518", c: C.accent2, t: "Routing" },
+type AgentCardState = {
+  index: number;
+  task: string;
+  state: "queued" | "calling" | "done" | "failed";
+  startedAtMs?: number;
+  finishedAtMs?: number;
+  result?: {
+    status?: string;
+    wait_status?: string;
+    duration_seconds?: number | null;
+    elapsed_wait_seconds?: number | null;
+    result_summary?: string;
+    issues_detected?: string[];
+    call_sid?: string;
+    analysis_report?: {
+      model?: string;
+      confidence?: string;
+      task_outcome?: string;
+      edge_cases?: string[];
+      recommendations?: string[];
+    };
+    analysis_error?: string;
+    error?: string;
   };
-  const s = m[status] ?? m.info;
-  return (
-    <span
-      style={{
-        background: s.bg,
-        color: s.c,
-        border: `1px solid ${s.c}40`,
-        padding: "3px 8px",
-        borderRadius: 6,
-        fontSize: 11,
-        fontWeight: 600,
-      }}
-    >
-      {s.t}
-    </span>
-  );
+};
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5000";
+const MIN_AGENTS = 2;
+const MAX_AGENTS = 10;
+
+function apiUrl(path: string) {
+  return `${API_BASE}${path}`;
 }
 
-function Transcript({ transcript }: { transcript: { role: string; text: string; fail?: boolean }[] }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {transcript.map((l, i) => (
-        <div
-          key={i}
-          style={{
-            display: "flex",
-            gap: 10,
-            flexDirection: l.role === "agent" ? "row-reverse" : "row",
-            alignItems: "flex-start",
-          }}
-        >
-          <span
-            style={{
-              fontSize: 9,
-              fontFamily: "monospace",
-              color: C.sub,
-              minWidth: 36,
-              paddingTop: 6,
-              textAlign: l.role === "agent" ? "right" : "left",
-              letterSpacing: 1,
-            }}
-          >
-            {l.role === "agent" ? "AGENT" : "IVR"}
-          </span>
-          <div
-            style={{
-              background: l.fail ? "#f43f5e12" : l.role === "agent" ? "#4f46e518" : C.surface,
-              border: `1px solid ${l.fail ? "#f43f5e40" : l.role === "agent" ? "#4f46e540" : "transparent"}`,
-              color: l.fail ? C.red : l.role === "agent" ? C.accent2 : C.text,
-              padding: "7px 12px",
-              borderRadius: 8,
-              fontSize: 12,
-              lineHeight: 1.5,
-              maxWidth: "75%",
-            }}
-          >
-            {l.text}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
+function formatSeconds(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "n/a";
+  return `${Number(value).toFixed(1)}s`;
 }
 
-function TreeNode({
-  node,
-  depth = 0,
-}: {
-  node: ReportNode;
-  depth?: number;
-}) {
-  const [open, setOpen] = useState(false);
-  const [showTranscript, setShowTranscript] = useState(false);
-  const color = dotColor(node.status === "ok" ? "green" : node.status === "fail" ? "red" : node.status === "warn" ? "yellow" : "blue");
-  const hasChildren = (node.children?.length ?? 0) > 0;
-  const summary = `Depth ${node.depth} · ${node.retries} retries · ${node.outcome}`;
-  return (
-    <div style={{ marginLeft: depth * 16 }} className="mb-1">
-      <div
-        onClick={() => setOpen(!open)}
-        className="flex items-start gap-2.5 py-2.5 px-3 rounded-lg cursor-pointer transition-colors border border-transparent hover:border-[var(--calpen-border)]"
-        style={{
-          background: open ? "rgba(255,255,255,0.04)" : "transparent",
-          borderColor: open ? "var(--calpen-border)" : undefined,
-        }}
-      >
-        <div
-          className="w-2.5 h-2.5 rounded-full flex-shrink-0 mt-0.5"
-          style={{ background: color, boxShadow: `0 0 6px ${color}80` }}
-        />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-semibold text-[var(--calpen-text)]">{node.label}</span>
-            <StatusBadge status={node.status} />
-            <span className="text-[var(--calpen-label)] text-xs ml-auto">{open ? "▲" : "▼"}</span>
-          </div>
-          <p className="text-xs text-[var(--calpen-muted)] mt-0.5">{node.meta}</p>
-        </div>
-      </div>
-      {open && (
-        <div className="ml-4 pl-4 border-l border-[var(--calpen-border)] mt-1 mb-3">
-          <p className="text-xs text-[var(--calpen-muted)] mb-3">{summary}</p>
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); setShowTranscript(!showTranscript); }}
-            className="text-xs font-medium text-[var(--calpen-blue)] hover:underline mb-2"
-          >
-            {showTranscript ? "Hide transcript" : "Show transcript"}
-          </button>
-          {showTranscript && (
-            <div className="bg-[var(--calpen-surface)] rounded-lg p-3 border border-[var(--calpen-border)]">
-              <Transcript transcript={node.transcript} />
-            </div>
-          )}
-          {hasChildren && node.children?.map((c) => <TreeNode key={c.id} node={c} depth={0} />)}
-        </div>
-      )}
-    </div>
-  );
+function parseTasks(raw: string) {
+  return raw
+    .split(/\n+/)
+    .map((line) => line.replace(/^[\-\*\d\.\)\s]+/, "").trim())
+    .filter(Boolean);
 }
 
-function findNode(
-  nodes: ReportNode[],
-  id: string
-): ReportNode | null {
-  for (const n of nodes) {
-    if (n.id === id) return n;
-    if (n.children) {
-      const f = findNode(n.children, id);
-      if (f) return f;
-    }
+async function postJson(path: string, body: unknown) {
+  const res = await fetch(apiUrl(path), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error || res.statusText || "Request failed.");
   }
-  return null;
+  return data;
 }
 
-function FrictionItem({
-  item,
+function InputPage({
+  onStart,
 }: {
-  item: (typeof FRICTION_POINTS)[0];
+  onStart: (cfg: RunConfig) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const color = item.severity === "high" ? C.red : C.yellow;
-  const node = findNode(REPORT_TREE, item.nodeId);
-  return (
-    <div
-      style={{
-        background: C.card,
-        border: `1px solid ${open ? `${color}40` : C.border}`,
-        borderRadius: 10,
-        overflow: "hidden",
-        transition: "border-color 0.2s",
-      }}
-    >
-      <div
-        onClick={() => setOpen(!open)}
-        style={{ display: "flex", alignItems: "center", gap: 14, padding: "16px 20px", cursor: "pointer" }}
-      >
-        <div style={{ fontFamily: "monospace", fontSize: 20, color: C.border, minWidth: 28, fontWeight: 800 }}>{item.rank}</div>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 14, color: C.text, fontWeight: 600 }}>{item.label}</div>
-          <div style={{ fontSize: 11, fontFamily: "monospace", color: C.sub, marginTop: 3 }}>{item.sub}</div>
-        </div>
-        <div style={{ fontFamily: "monospace", fontSize: 24, color, fontWeight: 800, minWidth: 36, textAlign: "right" }}>
-          {item.count}
-        </div>
-        <div style={{ fontSize: 11, color: C.sub, marginLeft: 8 }}>{open ? "▲" : "▼"}</div>
-      </div>
-      {open && (
-        <div style={{ borderTop: `1px solid ${C.border}`, padding: "16px 20px", background: C.surface }}>
-          <Label text="CALL PATH" />
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-            {item.path.map((step, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span
-                  style={{
-                    background: step.includes("❌") ? "#f43f5e18" : C.border,
-                    color: step.includes("❌") ? C.red : C.sub,
-                    border: `1px solid ${step.includes("❌") ? "#f43f5e40" : "transparent"}`,
-                    padding: "3px 10px",
-                    borderRadius: 6,
-                    fontSize: 11,
-                    fontWeight: 600,
-                  }}
-                >
-                  {step}
-                </span>
-                {i < item.path.length - 1 && <span style={{ color: C.border, fontSize: 10 }}>→</span>}
-              </div>
-            ))}
-          </div>
-          {node && (
-            <>
-              <Label text="TRANSCRIPT" />
-              <Transcript transcript={node.transcript} />
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
+  const [phone, setPhone] = useState("");
+  const [description, setDescription] = useState("");
+  const [websiteUrl, setWebsiteUrl] = useState("");
+  const [numAgents, setNumAgents] = useState(3);
+  const [tasksRaw, setTasksRaw] = useState("- book appointment\n- cancel appointment\n- check status");
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [suggestLoading, setSuggestLoading] = useState(false);
 
-function LivePage({ phone, desc, onDone }: { phone: string; desc: string; onDone: () => void }) {
-  const [agentStatuses, setAgentStatuses] = useState<("waiting" | "active" | "done")[]>(
-    AGENT_SEQUENCE.map(() => "waiting")
-  );
-  const [logs, setLogs] = useState<{ cls?: string; text: string; ts?: string }[]>([]);
-  const [treeNodes, setTreeNodes] = useState<{ indent: number; dot: string; label: string; meta: string }[]>([]);
-  const [callActive, setCallActive] = useState(false);
-  const [callTimer, setCallTimer] = useState(0);
-  const [, setCurrentIdx] = useState(0);
-  const logRef = useRef<HTMLDivElement>(null);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startedRef = useRef(false);
-
-  useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    runAgent(0);
-  }, []);
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [logs]);
-
-  function runAgent(idx: number) {
-    if (idx >= AGENT_SEQUENCE.length) {
-      setTimeout(onDone, 700);
+  const onSuggest = async () => {
+    setError("");
+    setStatus("");
+    const summary = description.trim();
+    if (!summary) {
+      setError("Business summary is required to suggest tasks.");
       return;
     }
-    const agent = AGENT_SEQUENCE[idx];
-    setCurrentIdx(idx);
-    setCallActive(true);
-    setCallTimer(0);
-    setAgentStatuses((prev) => prev.map((s, i) => (i === idx ? "active" : s)));
-    setLogs((prev) => [...prev, { cls: "divider", text: `── ${agent.id} · ${agent.goal} ──` }]);
-    timerRef.current = setInterval(() => setCallTimer((t) => t + 1), 1000);
-    agent.logs.forEach((l) => {
-      setTimeout(
-        () => setLogs((prev) => [...prev, { ...l, ts: new Date().toTimeString().slice(0, 8) }]),
-        l.t
-      );
+    setSuggestLoading(true);
+    try {
+      const data = await postJson("/api/tasks/suggest", { description: summary });
+      const tasks = (data?.tasks || []) as string[];
+      if (!tasks.length) {
+        setStatus("No suggested tasks returned.");
+      } else {
+        setTasksRaw(tasks.map((task) => `- ${task}`).join("\n"));
+        setStatus("Suggested tasks generated.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to suggest tasks.");
+    } finally {
+      setSuggestLoading(false);
+    }
+  };
+
+  const launch = () => {
+    setError("");
+    setStatus("");
+    const parsedTasks = parseTasks(tasksRaw);
+    if (!description.trim()) {
+      setError("Business summary is required.");
+      return;
+    }
+    if (!phone.trim()) {
+      setError("US phone number is required.");
+      return;
+    }
+    if (numAgents < MIN_AGENTS || numAgents > MAX_AGENTS) {
+      setError(`Agent count must be between ${MIN_AGENTS} and ${MAX_AGENTS}.`);
+      return;
+    }
+    if (!parsedTasks.length) {
+      setError("Task list is required (at least one task).");
+      return;
+    }
+    onStart({
+      phone: phone.trim(),
+      description: description.trim(),
+      websiteUrl: websiteUrl.trim(),
+      numAgents,
+      tasks: parsedTasks,
     });
-    agent.nodes.forEach((node, ni) => {
-      setTimeout(
-        () => setTreeNodes((prev) => [...prev, node]),
-        agent.duration * 0.25 + ni * 260
-      );
-    });
-    setTimeout(() => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      setCallActive(false);
-      setAgentStatuses((prev) => prev.map((s, i) => (i === idx ? "done" : s)));
-      setTimeout(() => runAgent(idx + 1), 600);
-    }, agent.duration);
-  }
+  };
 
-  const done = agentStatuses.filter((s) => s === "done").length;
-  const progress = Math.round((done / AGENT_SEQUENCE.length) * 100);
-
-  return (
-    <div className="py-7 px-6 md:px-9 max-w-6xl mx-auto relative z-10 text-white">
-      <style>{`@keyframes calpen-fadein{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:translateX(0)}}`}</style>
-      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-5">
-        <div>
-          <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight">Scanning IVR</h2>
-          <p className="text-[var(--calpen-muted)] text-sm mt-1">{phone} · {desc}</p>
-        </div>
-        <div
-          className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium border ${
-            callActive
-              ? "bg-[var(--calpen-green)]/10 border-[var(--calpen-green)]/40 text-[var(--calpen-green)]"
-              : "bg-white/5 border-[var(--calpen-border)] text-[var(--calpen-muted)]"
-          }`}
-        >
-          {callActive && <div className="w-2 h-2 rounded-full bg-[var(--calpen-green)] animate-pulse" />}
-          {callActive
-            ? `CALL ACTIVE · ${String(Math.floor(callTimer / 60)).padStart(2, "0")}:${String(callTimer % 60).padStart(2, "0")}`
-            : "BETWEEN CALLS"}
-        </div>
-      </div>
-
-      <div className="mb-5">
-        <div className="flex justify-between text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-1.5">
-          <span>Overall progress — {done} of {AGENT_SEQUENCE.length} calls complete</span>
-          <span>{progress}%</span>
-        </div>
-        <div className="h-1 bg-[var(--calpen-surface)] rounded-full overflow-hidden border border-[var(--calpen-border)]">
-          <div
-            className="h-1 bg-[var(--calpen-muted)] rounded-full transition-all duration-500 ease-out"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        {AGENT_SEQUENCE.map((a, i) => {
-          const s = agentStatuses[i];
-          const isActive = s === "active";
-          const isDone = s === "done";
-          const isWaiting = s === "waiting";
-          const dotClass = isActive ? "bg-[var(--calpen-green)]" : isDone ? "bg-[var(--calpen-muted)]" : "bg-[var(--calpen-label)]";
-          return (
-            <div
-              key={a.id}
-              className={`rounded-xl border p-4 transition-all duration-300 ${
-                isActive ? "bg-[var(--calpen-surface)] border-[var(--calpen-green)]/40 opacity-100" : "bg-[var(--calpen-surface)]/80 border-[var(--calpen-border)] " + (isWaiting ? "opacity-50" : "opacity-100")
-              }`}
-            >
-              <div className="flex items-center gap-2 mb-1.5">
-                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotClass} ${isActive ? "animate-pulse" : ""}`} />
-                <span className={`text-sm font-semibold ${isActive ? "text-[var(--calpen-green)]" : isDone ? "text-[var(--calpen-muted)]" : "text-[var(--calpen-label)]"}`}>{a.id}</span>
-                <span className="ml-auto text-xs uppercase tracking-wider text-[var(--calpen-label)]">
-                  {isWaiting ? "Queued" : isActive ? "ON CALL ▶" : "DONE ✓"}
-                </span>
-              </div>
-              <p className="text-[var(--calpen-muted)] text-sm leading-snug">{a.goal}</p>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="grid md:grid-cols-[1fr_280px] gap-4">
-        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-5 overflow-y-auto max-h-[calc(100vh-420px)]">
-          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-4">IVR Tree — Discovered Nodes</p>
-          {treeNodes.length === 0 && (
-            <p className="text-[var(--calpen-muted)] text-sm">Waiting for first call to complete...</p>
-          )}
-          {treeNodes.map((node, i) => (
-            <div
-              key={`${node.label}-${i}-${node.indent}`}
-              className="flex gap-2.5 mb-2.5 animate-[calpen-fadein_0.35s_ease]"
-              style={{ marginLeft: node.indent * 20 }}
-            >
-              <div
-                className="w-2 h-2 rounded-full flex-shrink-0 mt-1.5"
-                style={{ backgroundColor: dotColor(node.dot), boxShadow: `0 0 8px ${dotColor(node.dot)}80` }}
-              />
-              <div>
-                <p className="text-[var(--calpen-text)] text-sm font-semibold">{node.label}</p>
-                <p className="text-[var(--calpen-label)] text-xs mt-0.5">{node.meta}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-        <div
-          ref={logRef}
-          className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-5 overflow-y-auto max-h-[calc(100vh-420px)]"
-        >
-          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-4">Call Log</p>
-          {logs.map((l, i) =>
-            l.cls === "divider" ? (
-              <p key={`div-${i}-${l.text}`} className="text-[var(--calpen-muted)] text-xs my-2 font-mono">{l.text}</p>
-            ) : (
-              <p
-                key={`log-${i}-${l.ts ?? 0}-${l.text}`}
-                className={`text-xs mb-1 font-mono animate-[calpen-fadein_0.2s_ease] ${
-                  l.cls === "ok" ? "text-[var(--calpen-green)]" : l.cls === "err" ? "text-[var(--calpen-red)]" : l.cls === "warn" ? "text-[var(--calpen-amber)]" : "text-[var(--calpen-label)]"
-                }`}
-              >
-                <span className="text-[var(--calpen-label)] opacity-70 mr-2">{l.ts}</span>
-                {l.text}
-              </p>
-            )
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function InputPage({ onStart }: { onStart: (phone: string, desc: string) => void }) {
-  const [phone, setPhone] = useState("");
-  const [desc, setDesc] = useState("");
   return (
     <section className="relative min-h-screen flex flex-col">
       <div
         className="absolute inset-0 bg-cover bg-center bg-no-repeat"
-        style={{ backgroundImage: `url('https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1920&q=80')` }}
+        style={{ backgroundImage: "url('https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1920&q=80')" }}
       />
       <div className="absolute inset-0 bg-gradient-to-b from-[#13110e]/60 via-[#13110e]/40 to-[#13110e]" />
-      <div className="relative z-10 flex-1 flex flex-col items-center justify-center text-center px-4 pt-32">
+      <div className="relative z-10 flex-1 flex flex-col items-center justify-center text-center px-4 pt-32 pb-16">
         <div className="inline-flex items-center gap-2 glass-nav rounded-full px-4 py-2 text-sm text-gray-300 mb-8 animate-fade-in-up">
           <span className="w-2 h-2 bg-green-500 rounded-full pulse-indicator" />
           <span className="tracking-wider uppercase text-xs">IVR penetration testing</span>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="ml-1">
-            <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
         </div>
         <h1 className="font-serif text-5xl md:text-6xl lg:text-7xl text-white max-w-4xl leading-tight animate-fade-in-up animate-delay-100">
           Find where your
@@ -715,32 +157,80 @@ function InputPage({ onStart }: { onStart: (phone: string, desc: string) => void
           phone system fails.
         </h1>
         <p className="text-gray-400 text-lg md:text-xl mt-6 max-w-xl animate-fade-in-up animate-delay-200">
-          Automated IVR audits—AI agents call every branch and map friction points.
+          Automated IVR audits, real outbound calls, and edge-case analysis.
         </p>
-        <div className="mt-8 w-full max-w-md animate-fade-in-up animate-delay-300">
+
+        <div className="mt-8 w-full max-w-2xl animate-fade-in-up animate-delay-300">
           <div className="glass-nav rounded-2xl p-6 md:p-8 text-left border border-white/10">
-            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Target phone number</label>
+            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Target US phone number</label>
             <input
               type="text"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
-              placeholder="+1 (800) 555-0100"
+              placeholder="+1 555 123 4567"
               className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none mb-4"
             />
-            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Company description</label>
+
+            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Business summary (required)</label>
             <textarea
-              value={desc}
-              onChange={(e) => setDesc(e.target.value)}
-              rows={2}
-              placeholder="e.g. dental office in Virginia"
-              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none resize-none mb-6"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              placeholder="What the business does, key services, common customer requests..."
+              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none resize-y mb-4"
             />
+
+            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Business website (optional)</label>
+            <input
+              type="url"
+              value={websiteUrl}
+              onChange={(e) => setWebsiteUrl(e.target.value)}
+              placeholder="https://example.com"
+              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none mb-4"
+            />
+
+            <div className="grid md:grid-cols-3 gap-4 mb-4">
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Agents (2-10)</label>
+                <input
+                  type="number"
+                  min={MIN_AGENTS}
+                  max={MAX_AGENTS}
+                  value={numAgents}
+                  onChange={(e) => setNumAgents(Number(e.target.value || 0))}
+                  className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none"
+                />
+              </div>
+              <div className="md:col-span-2 flex items-end">
+                <button
+                  type="button"
+                  onClick={onSuggest}
+                  disabled={suggestLoading}
+                  className="w-full md:w-auto border border-gray-600 text-white rounded-full px-5 py-3 text-sm font-medium hover:bg-white/5 transition-colors disabled:opacity-60"
+                >
+                  {suggestLoading ? "Generating..." : "Suggest tasks from summary"}
+                </button>
+              </div>
+            </div>
+
+            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Task list (one per line)</label>
+            <textarea
+              value={tasksRaw}
+              onChange={(e) => setTasksRaw(e.target.value)}
+              rows={6}
+              placeholder="- book appointment&#10;- cancel appointment&#10;- check status"
+              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none resize-y mb-6"
+            />
+
             <button
-              onClick={() => onStart(phone || "+1 (800) 555-0100", desc || "dental office in Virginia")}
+              onClick={launch}
               className="w-full bg-white text-black font-medium px-6 py-3 rounded-full hover:bg-gray-100 transition-colors"
             >
               Launch penetration test
             </button>
+
+            {status ? <p className="text-green-400 text-sm mt-3">{status}</p> : null}
+            {error ? <p className="text-red-400 text-sm mt-3">{error}</p> : null}
           </div>
         </div>
       </div>
@@ -748,47 +238,307 @@ function InputPage({ onStart }: { onStart: (phone: string, desc: string) => void
   );
 }
 
-function ReportPage({ phone, desc, onReset }: { phone: string; desc: string; onReset: () => void }) {
-  const metrics = [
-    { label: "Human Necessity Score", value: `${TOP_LEVEL_METRICS.humanNecessityScore}%`, color: "var(--calpen-red)", desc: "of tasks require a human" },
-    { label: "Automation Rate", value: `${TOP_LEVEL_METRICS.automationRate}%`, color: "var(--calpen-green)", desc: "fully resolved by IVR" },
-    { label: "Branches Mapped", value: String(TOP_LEVEL_METRICS.branchesMapped), color: "var(--calpen-text)", desc: "nodes discovered" },
-    { label: "Dead Ends Found", value: String(TOP_LEVEL_METRICS.deadEndsFound), color: "var(--calpen-red)", desc: "paths with no resolution" },
-  ];
+function LivePage({
+  cfg,
+  onDone,
+}: {
+  cfg: RunConfig;
+  onDone: (results: AgentCardState[]) => void;
+}) {
+  const initialAgents = useMemo<AgentCardState[]>(
+    () =>
+      Array.from({ length: cfg.numAgents }, (_, i) => ({
+        index: i + 1,
+        task: cfg.tasks[i % cfg.tasks.length],
+        state: "queued",
+      })),
+    [cfg.numAgents, cfg.tasks]
+  );
+  const [agents, setAgents] = useState<AgentCardState[]>(initialAgents);
+  const [statusText, setStatusText] = useState("Preparing run...");
+  const [errorText, setErrorText] = useState("");
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [running, setRunning] = useState(true);
+  const startedAtRef = useRef<number>(Date.now());
+  const stoppedRef = useRef(false);
+
+  useEffect(() => {
+    const tick = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - startedAtRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  useEffect(() => {
+    setAgents(initialAgents);
+    startedAtRef.current = Date.now();
+    setElapsedSec(0);
+  }, [initialAgents]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let currentAgents = initialAgents.map((agent) => ({ ...agent }));
+
+    async function run() {
+      try {
+        await postJson("/api/context", {
+          description: cfg.description,
+          website_url: cfg.websiteUrl,
+        });
+      } catch (err) {
+        if (!cancelled) {
+          setErrorText(err instanceof Error ? err.message : "Failed to save context.");
+          setRunning(false);
+        }
+        return;
+      }
+
+      for (let i = 0; i < cfg.numAgents; i += 1) {
+        if (cancelled) return;
+        const idx = i + 1;
+        const task = cfg.tasks[i % cfg.tasks.length];
+        setStatusText(`Running agent ${idx} of ${cfg.numAgents}...`);
+        currentAgents = currentAgents.map((agent) =>
+          agent.index === idx ? { ...agent, state: "calling", startedAtMs: Date.now() } : agent
+        );
+        setAgents([...currentAgents]);
+
+        try {
+          const data = await postJson("/api/call/batch/one", {
+            to_number: cfg.phone,
+            description: cfg.description,
+            website_url: cfg.websiteUrl,
+            task,
+          });
+          const result = data?.result || {};
+          currentAgents = currentAgents.map((agent) =>
+            agent.index === idx
+              ? {
+                  ...agent,
+                  state: result.status === "failed" ? "failed" : "done",
+                  finishedAtMs: Date.now(),
+                  result,
+                }
+              : agent
+          );
+          setAgents([...currentAgents]);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Call failed.";
+          currentAgents = currentAgents.map((agent) =>
+            agent.index === idx
+              ? {
+                  ...agent,
+                  state: "failed",
+                  finishedAtMs: Date.now(),
+                  result: { error: msg, status: "failed" },
+                }
+              : agent
+          );
+          setAgents([...currentAgents]);
+        }
+      }
+
+      if (!cancelled) {
+        setRunning(false);
+        setStatusText("Run complete.");
+        if (!stoppedRef.current) {
+          stoppedRef.current = true;
+          onDone(currentAgents);
+        }
+      }
+    }
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg.description, cfg.numAgents, cfg.phone, cfg.tasks, cfg.websiteUrl, initialAgents, onDone]);
+
+  const doneCount = useMemo(
+    () => agents.filter((a) => a.state === "done" || a.state === "failed").length,
+    [agents]
+  );
+  const progress = Math.round((doneCount / cfg.numAgents) * 100);
+  const knownCallDurationTotal = useMemo(
+    () =>
+      agents.reduce((sum, a) => {
+        const value = Number(a.result?.duration_seconds);
+        return Number.isNaN(value) || value < 0 ? sum : sum + value;
+      }, 0),
+    [agents]
+  );
+
+  return (
+    <div className="py-7 px-6 md:px-9 max-w-6xl mx-auto relative z-10 text-white">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-5">
+        <div>
+          <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight">Running penetration test</h2>
+          <p className="text-[var(--calpen-muted)] text-sm mt-1">
+            {cfg.phone} · {cfg.description}
+          </p>
+        </div>
+        <div
+          className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium border ${
+            running
+              ? "bg-[var(--calpen-green)]/10 border-[var(--calpen-green)]/40 text-[var(--calpen-green)]"
+              : "bg-white/5 border-[var(--calpen-border)] text-[var(--calpen-muted)]"
+          }`}
+        >
+          {running && <div className="w-2 h-2 rounded-full bg-[var(--calpen-green)] animate-pulse" />}
+          {running ? `LIVE · ${String(Math.floor(elapsedSec / 60)).padStart(2, "0")}:${String(elapsedSec % 60).padStart(2, "0")}` : "COMPLETE"}
+        </div>
+      </div>
+
+      <div className="mb-5">
+        <div className="flex justify-between text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-1.5">
+          <span>{statusText}</span>
+          <span>{progress}%</span>
+        </div>
+        <div className="h-1 bg-[var(--calpen-surface)] rounded-full overflow-hidden border border-[var(--calpen-border)]">
+          <div className="h-1 bg-[var(--calpen-muted)] rounded-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {agents.map((agent) => {
+          const status = agent.result?.wait_status || agent.result?.status || agent.state;
+          const issues = agent.result?.issues_detected || [];
+          const report = agent.result?.analysis_report;
+          return (
+            <div key={agent.index} className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-5">
+              <div className="flex items-center gap-2 mb-2">
+                <div
+                  className={`w-2 h-2 rounded-full ${
+                    agent.state === "calling"
+                      ? "bg-[var(--calpen-green)] animate-pulse"
+                      : agent.state === "failed"
+                        ? "bg-[var(--calpen-red)]"
+                        : agent.state === "done"
+                          ? "bg-[var(--calpen-blue)]"
+                          : "bg-[var(--calpen-label)]"
+                  }`}
+                />
+                <h3 className="text-sm font-semibold text-white">Agent {agent.index}</h3>
+                <span className="ml-auto text-xs uppercase tracking-wider text-[var(--calpen-label)]">{status}</span>
+              </div>
+              <p className="text-sm text-[var(--calpen-muted)] mb-3">{agent.task}</p>
+              <div className="space-y-1 text-xs text-[var(--calpen-muted)] font-mono mb-3">
+                <p>Call duration: {formatSeconds(agent.result?.duration_seconds)}</p>
+                <p>Wait elapsed: {formatSeconds(agent.result?.elapsed_wait_seconds)}</p>
+                {agent.result?.call_sid ? <p>Call SID: {agent.result.call_sid}</p> : null}
+              </div>
+              {agent.result?.result_summary ? (
+                <p className="text-sm text-white mb-2">
+                  <span className="text-[var(--calpen-label)] uppercase text-[10px] tracking-wider mr-2">Summary</span>
+                  {agent.result.result_summary}
+                </p>
+              ) : null}
+              {issues.length ? (
+                <div className="mb-2">
+                  <p className="text-[10px] uppercase tracking-wider text-[var(--calpen-label)] mb-1">Issues detected</p>
+                  {issues.slice(0, 4).map((issue, idx) => (
+                    <p key={`${agent.index}-${idx}`} className="text-xs text-[var(--calpen-red)] mb-1">
+                      {issue}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+              {report ? (
+                <div className="pt-2 border-t border-[var(--calpen-border)] mt-2">
+                  <p className="text-xs text-[var(--calpen-muted)]">
+                    <span className="uppercase tracking-wider text-[10px] mr-2">AI outcome</span>
+                    {report.task_outcome || "unknown"} · {report.confidence || "n/a"} · {report.model || "n/a"}
+                  </p>
+                </div>
+              ) : null}
+              {agent.result?.analysis_error ? (
+                <p className="text-xs text-[var(--calpen-amber)] mt-2">{agent.result.analysis_error}</p>
+              ) : null}
+              {agent.result?.error ? <p className="text-xs text-[var(--calpen-red)] mt-2">{agent.result.error}</p> : null}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-6 bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4 text-sm text-[var(--calpen-muted)]">
+        <p>Total batch elapsed: {formatSeconds(elapsedSec)}</p>
+        <p>Total known call duration: {formatSeconds(knownCallDurationTotal)}</p>
+      </div>
+
+      {errorText ? <p className="text-sm text-[var(--calpen-red)] mt-4">{errorText}</p> : null}
+    </div>
+  );
+}
+
+function ReportPage({
+  cfg,
+  results,
+  onReset,
+}: {
+  cfg: RunConfig;
+  results: AgentCardState[];
+  onReset: () => void;
+}) {
+  const metrics = useMemo(() => {
+    const initiated = results.filter((r) => r.result?.status && r.result.status !== "failed").length;
+    const failed = results.filter((r) => r.state === "failed").length;
+    const totalDuration = results.reduce((sum, r) => {
+      const v = Number(r.result?.duration_seconds);
+      return Number.isNaN(v) || v < 0 ? sum : sum + v;
+    }, 0);
+    const totalIssues = results.reduce((sum, r) => sum + (r.result?.issues_detected?.length || 0), 0);
+    return { initiated, failed, totalDuration, totalIssues };
+  }, [results]);
+
   return (
     <div className="py-9 px-6 md:px-11 max-w-5xl mx-auto relative z-10 text-white">
       <div className="pb-7 mb-8 border-b border-[var(--calpen-border)]">
         <h2 className="text-2xl md:text-3xl font-bold text-[var(--calpen-text)] tracking-tight">Audit report</h2>
         <p className="text-[var(--calpen-muted)] text-sm mt-2 font-mono">
-          {phone} · {desc}
+          {cfg.phone} · {cfg.description}
           <br />
-          {new Date().toLocaleString()} · 4 agents · {TOP_LEVEL_METRICS.branchesMapped} nodes
+          {new Date().toLocaleString()} · {cfg.numAgents} agents
         </p>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
-        {metrics.map((k, i) => (
-          <div key={i} className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
-            <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">{k.label}</p>
-            <p className="text-2xl md:text-3xl font-bold leading-none" style={{ color: k.color }}>{k.value}</p>
-            <p className="text-[var(--calpen-label)] text-sm mt-1">{k.desc}</p>
+        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
+          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">Initiated</p>
+          <p className="text-2xl md:text-3xl font-bold text-[var(--calpen-text)]">{metrics.initiated}</p>
+        </div>
+        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
+          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">Failed</p>
+          <p className="text-2xl md:text-3xl font-bold text-[var(--calpen-red)]">{metrics.failed}</p>
+        </div>
+        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
+          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">Total call duration</p>
+          <p className="text-2xl md:text-3xl font-bold text-[var(--calpen-green)]">{formatSeconds(metrics.totalDuration)}</p>
+        </div>
+        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
+          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">Issues detected</p>
+          <p className="text-2xl md:text-3xl font-bold text-[var(--calpen-red)]">{metrics.totalIssues}</p>
+        </div>
+      </div>
+
+      <div className="space-y-3 mb-8">
+        {results.map((agent) => (
+          <div key={`report-${agent.index}`} className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
+            <p className="text-sm font-semibold text-white mb-1">
+              Agent {agent.index} · {agent.task}
+            </p>
+            <p className="text-xs text-[var(--calpen-muted)] mb-2">
+              {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds)}
+            </p>
+            {agent.result?.result_summary ? <p className="text-sm text-white mb-2">{agent.result.result_summary}</p> : null}
+            {(agent.result?.issues_detected || []).slice(0, 3).map((issue, idx) => (
+              <p key={`issue-${agent.index}-${idx}`} className="text-xs text-[var(--calpen-red)]">
+                {issue}
+              </p>
+            ))}
           </div>
         ))}
       </div>
 
-      <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">IVR tree</p>
-      <p className="text-[var(--calpen-muted)] text-sm mb-3">Click a node to see details. Green = automated, red = human transfer, yellow = partial.</p>
-      <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4 mb-6">
-        {REPORT_TREE.map((n) => (
-          <TreeNode key={n.id} node={n} />
-        ))}
-      </div>
-      <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-3">Top friction points — click to inspect</p>
-      <div className="flex flex-col gap-3 mb-8">
-        {FRICTION_POINTS.map((f) => (
-          <FrictionItem key={f.id} item={f} />
-        ))}
-      </div>
       <button
         onClick={onReset}
         className="border border-[var(--calpen-border)] text-[var(--calpen-text)] rounded-lg px-6 py-3 text-sm font-semibold hover:bg-white/5 transition-colors"
@@ -801,23 +551,45 @@ function ReportPage({ phone, desc, onReset }: { phone: string; desc: string; onR
 
 export default function Calpen() {
   const [page, setPage] = useState<"input" | "live" | "report">("input");
-  const [phone, setPhone] = useState("");
-  const [desc, setDesc] = useState("");
+  const [cfg, setCfg] = useState<RunConfig | null>(null);
+  const [results, setResults] = useState<AgentCardState[]>([]);
 
   return (
     <div className="min-h-screen bg-[#13110e] text-white">
       <Navbar />
-      {page === "input" && <InputPage onStart={(p, d) => { setPhone(p); setDesc(d); setPage("live"); }} />}
-      {page === "live" && (
+      {page === "input" && (
+        <InputPage
+          onStart={(nextCfg) => {
+            setCfg(nextCfg);
+            setResults([]);
+            setPage("live");
+          }}
+        />
+      )}
+      {page === "live" && cfg ? (
         <div className="pt-24 pb-12">
-          <LivePage key={phone} phone={phone} desc={desc} onDone={() => setPage("report")} />
+          <LivePage
+            cfg={cfg}
+            onDone={(nextResults) => {
+              setResults(nextResults);
+              setPage("report");
+            }}
+          />
         </div>
-      )}
-      {page === "report" && (
+      ) : null}
+      {page === "report" && cfg ? (
         <div className="pt-24 pb-16">
-          <ReportPage phone={phone} desc={desc} onReset={() => setPage("input")} />
+          <ReportPage
+            cfg={cfg}
+            results={results}
+            onReset={() => {
+              setCfg(null);
+              setResults([]);
+              setPage("input");
+            }}
+          />
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

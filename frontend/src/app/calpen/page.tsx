@@ -1,4 +1,4 @@
-import Calpen from "@/components/Calpen";
+import Calpen from "../../components/Calpen";
 
 export default function CalpenPage() {
   return <Calpen />;
