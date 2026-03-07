@@ -8,6 +8,8 @@ import { SmartInsights } from "@/components/SmartInsights";
 import { NaturalVoice } from "@/components/NaturalVoice";
 import { VoiceExperience } from "@/components/VoiceExperience";
 import { CustomerSpotlight } from "@/components/CustomerSpotlight";
+import { CTA } from "@/components/CTA";
+import { Footer } from "@/components/Footer";
 
 export default function Home() {
   return (
@@ -22,6 +24,8 @@ export default function Home() {
       <NaturalVoice />
       <VoiceExperience />
       <CustomerSpotlight />
+      <CTA />
+      <Footer />
     </main>
   );
 }
