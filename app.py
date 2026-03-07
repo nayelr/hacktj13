@@ -427,7 +427,6 @@ def openai_chat_completion(model: str, system_prompt: str, user_prompt: str):
         "/v1/chat/completions",
         {
             "model": model,
-            "temperature": 0.2,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
