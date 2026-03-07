@@ -480,71 +480,80 @@ function ReportPage({
   onReset: () => void;
 }) {
   const metrics = useMemo(() => {
-    const initiated = results.filter((r) => r.result?.status && r.result.status !== "failed").length;
-    const failed = results.filter((r) => r.state === "failed").length;
+    const initiated = results.length;
     const totalDuration = results.reduce((sum, r) => {
       const v = Number(r.result?.duration_seconds);
       return Number.isNaN(v) || v < 0 ? sum : sum + v;
     }, 0);
+    const averageDuration = initiated > 0 ? totalDuration / initiated : 0;
     const totalIssues = results.reduce((sum, r) => sum + (r.result?.issues_detected?.length || 0), 0);
-    return { initiated, failed, totalDuration, totalIssues };
+    return { initiated, totalDuration, averageDuration, totalIssues };
   }, [results]);
 
   return (
-    <div className="py-9 px-6 md:px-11 max-w-5xl mx-auto relative z-10 text-white">
-      <div className="pb-7 mb-8 border-b border-[var(--calpen-border)]">
-        <h2 className="text-2xl md:text-3xl font-bold text-[var(--calpen-text)] tracking-tight">Audit report</h2>
-        <p className="text-[var(--calpen-muted)] text-sm mt-2 font-mono">
-          {cfg.phone} · {cfg.description}
-          <br />
-          {new Date().toLocaleString()} · {cfg.numAgents} agents
-        </p>
-      </div>
+    <div className="relative min-h-screen">
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: "url('https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1920&q=80')" }}
+      />
+      <div className="absolute inset-0 bg-gradient-to-b from-[#13110e]/60 via-[#13110e]/40 to-[#13110e]" />
+      <div className="py-9 px-6 md:px-11 max-w-5xl mx-auto relative z-10 text-white">
+        <div className="pb-7 mb-8 border-b border-gray-700">
+          <h2 className="font-serif text-2xl md:text-3xl font-bold text-white tracking-tight">Audit report</h2>
+          <p className="text-gray-400 text-sm mt-2 font-serif">
+            {cfg.phone} · {cfg.description}
+            <br />
+            {new Date().toLocaleString()} · {cfg.numAgents} agents
+          </p>
+        </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
-        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
-          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">Initiated</p>
-          <p className="text-2xl md:text-3xl font-bold text-[var(--calpen-text)]">{metrics.initiated}</p>
-        </div>
-        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
-          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">Failed</p>
-          <p className="text-2xl md:text-3xl font-bold text-[var(--calpen-red)]">{metrics.failed}</p>
-        </div>
-        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
-          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">Total call duration</p>
-          <p className="text-2xl md:text-3xl font-bold text-[var(--calpen-green)]">{formatSeconds(metrics.totalDuration)}</p>
-        </div>
-        <div className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
-          <p className="text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-2">Issues detected</p>
-          <p className="text-2xl md:text-3xl font-bold text-[var(--calpen-red)]">{metrics.totalIssues}</p>
-        </div>
-      </div>
-
-      <div className="space-y-3 mb-8">
-        {results.map((agent) => (
-          <div key={`report-${agent.index}`} className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4">
-            <p className="text-sm font-semibold text-white mb-1">
-              Agent {agent.index} · {agent.task}
-            </p>
-            <p className="text-xs text-[var(--calpen-muted)] mb-2">
-              {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds)}
-            </p>
-            {agent.result?.result_summary ? <p className="text-sm text-white mb-2">{agent.result.result_summary}</p> : null}
-            {(agent.result?.issues_detected || []).slice(0, 3).map((issue, idx) => (
-              <p key={`issue-${agent.index}-${idx}`} className="text-xs text-[var(--calpen-red)]">
-                {issue}
-              </p>
-            ))}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          <div className="border-l border-gray-700 pl-6 py-2">
+            <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-2">Initiated</p>
+            <p className="font-serif text-2xl md:text-3xl font-light text-white">{metrics.initiated}</p>
           </div>
-        ))}
-      </div>
+          <div className="border-l border-gray-700 pl-6 py-2">
+            <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-2">Total call duration</p>
+            <p className="font-serif text-2xl md:text-3xl font-light text-[var(--calpen-green)]">{formatSeconds(metrics.totalDuration)}</p>
+          </div>
+          <div className="border-l border-gray-700 pl-6 py-2">
+            <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-2">Average call duration</p>
+            <p className="font-serif text-2xl md:text-3xl font-light text-white">{formatSeconds(metrics.averageDuration)}</p>
+          </div>
+          <div className="border-l border-gray-700 pl-6 py-2">
+            <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-2">Issues detected</p>
+            <p className="font-serif text-2xl md:text-3xl font-light text-white">{metrics.totalIssues}</p>
+          </div>
+        </div>
 
-      <button
-        onClick={onReset}
-        className="border border-[var(--calpen-border)] text-[var(--calpen-text)] rounded-lg px-6 py-3 text-sm font-semibold hover:bg-white/5 transition-colors"
-      >
-        ← Run another test
-      </button>
+        <div className="space-y-4 mb-8">
+          {results.map((agent) => (
+            <div key={`report-${agent.index}`} className="feature-card rounded-xl border border-gray-800 bg-white/[0.02] p-5">
+              <p className="font-serif text-sm font-semibold text-white mb-1">
+                Agent {agent.index} · {agent.task}
+              </p>
+              <p className="font-serif text-xs text-gray-400 mb-2">
+                {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds)}
+              </p>
+              {agent.result?.result_summary ? (
+                <p className="font-serif text-sm text-gray-300 mb-2 leading-relaxed">{agent.result.result_summary}</p>
+              ) : null}
+              {(agent.result?.issues_detected || []).slice(0, 3).map((issue, idx) => (
+                <p key={`issue-${agent.index}-${idx}`} className="font-serif text-xs text-[var(--calpen-red)]">
+                  {issue}
+                </p>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        <button
+          onClick={onReset}
+          className="font-serif border border-gray-700 text-white rounded-full px-6 py-3 text-sm font-medium hover:bg-white/5 transition-colors"
+        >
+          ← Run another test
+        </button>
+      </div>
     </div>
   );
 }
