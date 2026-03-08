@@ -82,7 +82,7 @@ type AgentCardState = {
   };
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:3001";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5001";
 const MIN_AGENTS = 2;
 const MAX_AGENTS = 10;
 
@@ -207,6 +207,7 @@ function InputPage({
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [suggestLoading, setSuggestLoading] = useState(false);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
 
   const onSuggest = async () => {
     setError("");
@@ -230,6 +231,41 @@ function InputPage({
       setError(err instanceof Error ? err.message : "Failed to suggest tasks.");
     } finally {
       setSuggestLoading(false);
+    }
+  };
+
+  const onDiscovery = async () => {
+    setError("");
+    setStatus("");
+    if (!description.trim()) {
+      setError("Business summary is required.");
+      return;
+    }
+    if (!phone.trim()) {
+      setError("US phone number is required.");
+      return;
+    }
+    setDiscoveryLoading(true);
+    try {
+      const data = await postJson("/api/discovery/run", {
+        to_number: phone.trim(),
+        description: description.trim(),
+        website_url: websiteUrl.trim() || undefined,
+      });
+      if (data?.ok && Array.isArray(data.tasks) && data.tasks.length) {
+        setTasksRaw(data.tasks.map((t: string) => `- ${t}`).join("\n"));
+        const clamped = Math.max(MIN_AGENTS, Math.min(MAX_AGENTS, data.tasks.length));
+        setNumAgents(clamped);
+        setStatus(`We discovered ${data.tasks.length} branches. ${clamped} agents will run. Edit if needed, then click Launch.`);
+      } else if (data?.ok && Array.isArray(data.tasks)) {
+        setStatus("Discovery completed but no tasks were derived. You can add tasks manually and launch.");
+      } else {
+        setError(data?.error || "Discovery failed.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Discovery request failed.");
+    } finally {
+      setDiscoveryLoading(false);
     }
   };
 
@@ -342,8 +378,18 @@ function InputPage({
               onChange={(e) => setTasksRaw(e.target.value)}
               rows={6}
               placeholder="- book appointment&#10;- cancel appointment&#10;- check status"
-              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none resize-y mb-6"
+              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none resize-y mb-4"
             />
+
+            <p className="text-center text-gray-500 text-sm mb-3">OR</p>
+            <button
+              type="button"
+              onClick={onDiscovery}
+              disabled={discoveryLoading}
+              className="w-full border border-gray-600 text-white rounded-full px-5 py-3 text-sm font-medium hover:bg-white/5 transition-colors disabled:opacity-60 mb-6"
+            >
+              {discoveryLoading ? "Discovering branches..." : "Use a voice agent to figure out the branches"}
+            </button>
 
             <button
               onClick={launch}

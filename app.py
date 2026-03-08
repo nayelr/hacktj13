@@ -242,7 +242,7 @@ def build_caller_prompt(business_description: str, scenario: str, caller_setting
         "If you already tried an invalid date, move on to a completely different category of edge case. "
         "Each probe must test something new. Track what you have already tried and do not repeat it.\n\n"
         "Edge case categories — rotate through these, pick based on what the system is currently asking for:\n"
-        "- DATE/TIME: invalid dates (Feb 30), future dates, past dates, ambiguous formats, relative dates (next Tuesday), missing year\n"
+        "- DATE/TIME: invalid dates future dates, past dates, ambiguous formats, relative dates (next Tuesday), missing year\n"
         "- IDENTITY: wrong name, partial name, name with special characters, mismatched account details, giving someone else's info\n"
         "- NUMBERS: wrong digit count, letters mixed into numbers, saying zero vs oh, pausing mid-number\n"
         "- NAVIGATION: asking for something not on the menu, jumping to a later step too early, skipping required fields\n"
@@ -285,6 +285,52 @@ def build_conversation_initiation_data(business_description: str, scenario: str,
                     "prompt": build_caller_prompt(business_description, scenario, caller_settings),
                 },
                 "first_message": build_first_message(scenario, caller_settings),
+            }
+        }
+    }
+    tts_settings = build_tts_settings(caller_settings)
+    if tts_settings:
+        conversation_data["conversation_config_override"]["tts"] = tts_settings
+    return conversation_data
+
+
+def build_caller_prompt_discovery(business_description: str, caller_settings: dict):
+    """System prompt for the scout call: discover IVR options/branches only, do not complete any task."""
+    caller_name = caller_settings.get("caller_name") or "Not specified"
+    caller_tone = caller_settings.get("caller_tone") or DEFAULT_CALLER_TONE
+    return (
+        "You are a caller whose only goal is to discover what this phone system can do. "
+        "You are not trying to complete any specific task (booking, canceling, etc.). "
+        "Your job is to explore the menus and report back what options and branches exist.\n\n"
+        "Behavior:\n"
+        "- Start by asking something like: 'What can you help me with today?' or 'What are my options?'\n"
+        "- When you hear menu options, briefly verbalize what you heard (e.g. 'So I can press 1 for appointments, 2 for billing').\n"
+        "- Explore the top-level menu and, when possible, one level of submenus. Do not go deep into any single flow.\n"
+        "- Do not hang up at the first dead end; try to hear the main options first.\n"
+        "- Stay polite and natural. Never mention testing, discovery, or that you are mapping the system.\n\n"
+        f"Caller name:\n{caller_name}\n\n"
+        f"Caller tone:\n{caller_tone}\n\n"
+        f"Business context (for your reference only):\n{business_description}\n\n"
+        "Speak concisely. Discover and briefly state what options the system offers."
+    )
+
+
+def build_first_message_discovery(caller_settings: dict):
+    caller_name = caller_settings.get("caller_name") or ""
+    if caller_name:
+        return f"Hi, this is {caller_name}. I'm calling to find out what options you offer—what can you help me with today?"
+    return "Hi, I'm calling to find out what options you offer—what can you help me with today?"
+
+
+def build_conversation_initiation_data_discovery(business_description: str, caller_settings: dict):
+    """Build conversation payload for the discovery (scout) call; no scenario/task."""
+    conversation_data = {
+        "conversation_config_override": {
+            "agent": {
+                "prompt": {
+                    "prompt": build_caller_prompt_discovery(business_description, caller_settings),
+                },
+                "first_message": build_first_message_discovery(caller_settings),
             }
         }
     }
@@ -1420,6 +1466,128 @@ def _run_post_call_analysis(analysis_id: str, task: str, entry: dict, wait_resul
         entry["analysis_done"] = True
 
 
+def sync_agent_configuration_discovery(agent_id: str, business_description: str, caller_settings: dict):
+    """Sync the ElevenLabs agent to use the discovery prompt before making the scout call."""
+    current_agent = elevenlabs_get(f"/v1/convai/agents/{agent_id}")
+    conversation_config = json.loads(json.dumps(current_agent.get("conversation_config") or {}))
+    agent_config = conversation_config.setdefault("agent", {})
+    prompt_config = agent_config.setdefault("prompt", {})
+
+    agent_config["first_message"] = build_first_message_discovery(caller_settings)
+    prompt_config["prompt"] = build_caller_prompt_discovery(business_description, caller_settings)
+    prompt_config["tool_ids"] = []
+    prompt_config["tools"] = []
+    tts_config = conversation_config.setdefault("tts", {})
+    for key, value in build_tts_settings(caller_settings).items():
+        tts_config[key] = value
+
+    elevenlabs_request_patch(
+        f"/v1/convai/agents/{agent_id}",
+        {"conversation_config": conversation_config},
+    )
+    return agent_id
+
+
+def run_scout_call(business_description: str, to_number: str, voice_ids=None):
+    """
+    Run one discovery (scout) call to the IVR: explore menus and options without completing a task.
+    Returns dict with call_sid, conversation_id, duration_seconds, transcript_lines (list of "Speaker: text"), status, error.
+    """
+    voice_ids = voice_ids or get_available_voice_ids_cached()
+    caller_settings = randomize_caller_settings(voice_ids)
+    session["caller_settings"] = caller_settings
+
+    agent_id = os.getenv("ELEVENLABS_AGENT_ID")
+    sync_agent_configuration_discovery(agent_id, business_description, caller_settings)
+
+    payload = {
+        "agent_id": agent_id,
+        "agent_phone_number_id": os.getenv("ELEVENLABS_AGENT_PHONE_NUMBER_ID"),
+        "to_number": to_number,
+        "conversation_initiation_client_data": build_conversation_initiation_data_discovery(
+            business_description,
+            caller_settings,
+        ),
+    }
+    result = {
+        "call_sid": None,
+        "conversation_id": None,
+        "duration_seconds": None,
+        "transcript_lines": [],
+        "status": "failed",
+        "error": None,
+    }
+    try:
+        call_response = elevenlabs_post("/v1/convai/twilio/outbound-call", payload)
+        result["status"] = call_response.get("status", "initiated")
+        result["call_sid"] = call_response.get("call_sid") or call_response.get("callSid")
+        result["conversation_id"] = call_response.get("conversation_id") or call_response.get("conversationId")
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    wait_result = wait_for_call_completion(
+        call_sid=result["call_sid"],
+        conversation_id=result["conversation_id"],
+        poll_seconds=1,
+        run_id="",
+    )
+    result["duration_seconds"] = wait_result.get("duration_seconds")
+    result["elapsed_wait_seconds"] = wait_result.get("elapsed_wait_seconds")
+    result["wait_status"] = wait_result.get("status")
+
+    detail_payloads = fetch_conversation_detail_payloads(
+        call_sid=result["call_sid"],
+        conversation_id=result["conversation_id"],
+    )
+    all_messages = []
+    for pl in detail_payloads or []:
+        all_messages.extend(_extract_text_messages_from_payload(pl))
+    result["transcript_lines"] = [
+        f"{msg.get('speaker', 'unknown')}: {msg.get('text', '')}".strip()
+        for msg in all_messages
+        if (msg.get("text") or "").strip()
+    ]
+    return result
+
+
+def derive_tasks_from_transcript(transcript_lines: list, business_description: str, max_tasks: int = 10):
+    """
+    Turn scout transcript into a list of concrete, testable tasks the IVR supports.
+    Falls back to suggest_tasks_from_summary if transcript is empty or OpenAI is unavailable.
+    """
+    transcript_text = "\n".join(transcript_lines).strip() if transcript_lines else ""
+    transcript_text = transcript_text[:DEFAULT_OPENAI_TRANSCRIPT_CHAR_LIMIT]
+    business_context = (business_description or "")[:5000]
+    fallback = suggest_tasks_from_summary(business_description or "")[:max_tasks]
+    if not transcript_text or len(transcript_text) < 100:
+        return fallback
+    if not os.getenv("OPENAI_API_KEY"):
+        return fallback
+    model = os.getenv("OPENAI_ANALYSIS_MODEL", DEFAULT_OPENAI_ANALYSIS_MODEL)
+    system_prompt = (
+        "You are given a transcript of a discovery call to an IVR. The caller asked what the system can do and explored menus. "
+        "Extract a list of concrete, testable tasks (short verb phrases) that the IVR actually offered or supports based on the transcript. "
+        "Examples: 'book an appointment', 'check billing balance', 'speak to an agent'. "
+        "Return JSON only: {\"tasks\": [\"string\", ...]} with all discovered branches (up to 10). "
+        "Each task should be something a penetration test could run (one scenario per branch)."
+    )
+    user_prompt = (
+        f"Business context:\n{business_context}\n\n"
+        f"Discovery call transcript:\n{transcript_text}\n\n"
+        "List the tasks/branches the IVR supports as a JSON object with a 'tasks' array."
+    )
+    try:
+        report = openai_chat_completion(model, system_prompt, user_prompt)
+        tasks = report.get("tasks")
+        if not isinstance(tasks, list):
+            return fallback
+        cleaned = [str(t).strip() for t in tasks if str(t).strip()]
+        return cleaned[:max_tasks] if cleaned else fallback
+    except Exception:
+        return fallback
+
+
 def run_single_batch_call(business_description: str, to_number: str, task: str, voice_ids=None, run_id: str = "", async_analysis: bool = False):
     scenario = task.strip()
     if run_id and _is_run_cancelled(run_id):
@@ -1629,6 +1797,44 @@ def suggest_tasks():
         return jsonify({"error": "Business summary is required to suggest tasks."}), 400
     tasks = suggest_tasks_from_summary(summary)
     return jsonify({"tasks": tasks})
+
+
+@app.route("/api/discovery/run", methods=["POST"])
+def discovery_run():
+    """
+    Run Phase 1 (scout call) and Phase 2 (derive tasks from transcript).
+    Returns { ok, tasks?, error?, transcript_excerpt? }.
+    """
+    data = request.get_json() or {}
+    to_number = normalize_us_phone_number(data.get("to_number") or data.get("phone") or "")
+    if not to_number or not validate_phone_number(to_number):
+        return jsonify({"ok": False, "error": "Phone number must be a valid US number."}), 400
+    try:
+        business_description, website_url = resolve_business_description(data)
+        if website_url:
+            session["website_url"] = website_url
+            session["business_description"] = business_description
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    missing = [n for n in ("ELEVENLABS_API_KEY", "ELEVENLABS_AGENT_ID", "ELEVENLABS_AGENT_PHONE_NUMBER_ID") if not os.getenv(n)]
+    if missing:
+        return jsonify({"ok": False, "error": f"Missing: {', '.join(missing)}"}), 500
+    scout = run_scout_call(business_description, to_number)
+    if scout.get("error"):
+        return jsonify({"ok": False, "error": scout["error"]}), 502
+    if scout.get("status") == "failed":
+        return jsonify({"ok": False, "error": "Scout call did not complete successfully."}), 502
+    transcript_lines = scout.get("transcript_lines") or []
+    if not transcript_lines:
+        return jsonify({"ok": False, "error": "No transcript from scout call. Enter branches manually or try again."}), 502
+    tasks = derive_tasks_from_transcript(transcript_lines, business_description, max_tasks=10)
+    if not tasks:
+        tasks = suggest_tasks_from_summary(business_description)[:10]
+    return jsonify({
+        "ok": True,
+        "tasks": tasks,
+        "transcript_excerpt": transcript_lines[:20],
+    })
 
 
 @app.route("/api/voices", methods=["GET"])
@@ -1989,4 +2195,4 @@ def aggregate_report():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=3001, use_reloader=False)
+    app.run(debug=True, port=5001, use_reloader=False)
