@@ -18,7 +18,7 @@ function AnimatedCounter({ target, suffix = "" }: { target: number; suffix?: str
 
   useEffect(() => {
     if (!isVisible) return;
-    const duration = 2000;
+    const duration = 3200;
     const steps = 60;
     const stepValue = target / steps;
     let current = 0;
@@ -42,6 +42,7 @@ function AnimatedCounter({ target, suffix = "" }: { target: number; suffix?: str
 }
 
 const TYPEWRITER_TEXT = "you decide…";
+const DELAY_AFTER_65_PERCENT_MS = 3200;
 
 function AgentsCountWithTypewriter() {
   const [count, setCount] = useState(0);
@@ -49,6 +50,7 @@ function AgentsCountWithTypewriter() {
   const [phase, setPhase] = useState<"count" | "type">("count");
   const ref = useRef<HTMLDivElement>(null);
   const [isVisible, setIsVisible] = useState(false);
+  const [started, setStarted] = useState(false);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -60,7 +62,13 @@ function AgentsCountWithTypewriter() {
   }, []);
 
   useEffect(() => {
-    if (!isVisible) return;
+    if (!isVisible || started) return;
+    const t = setTimeout(() => setStarted(true), DELAY_AFTER_65_PERCENT_MS);
+    return () => clearTimeout(t);
+  }, [isVisible, started]);
+
+  useEffect(() => {
+    if (!started) return;
     if (phase === "count") {
       const target = 50;
       const delayFor = (step: number) => (step >= 30 ? 28 : Math.max(28, 160 - step * 4));
@@ -79,16 +87,16 @@ function AgentsCountWithTypewriter() {
       return () => clearTimeout(timeoutId);
     }
     if (phase === "type" && typed.length < TYPEWRITER_TEXT.length) {
-      const baseMs = 70;
-      const minMs = 28;
-      const speedUp = (i: number) => Math.max(minMs, baseMs - i * 4);
+      const baseMs = 130;
+      const minMs = 52;
+      const speedUp = (i: number) => Math.max(minMs, baseMs - i * 5);
       const i = typed.length;
       const timeout = setTimeout(() => {
         setTyped(TYPEWRITER_TEXT.slice(0, i + 1));
       }, speedUp(i));
       return () => clearTimeout(timeout);
     }
-  }, [isVisible, phase, typed]);
+  }, [started, phase, typed]);
 
   return (
     <div ref={ref} className="text-5xl md:text-6xl font-light text-white">
@@ -110,8 +118,8 @@ export function Stats() {
           </div>
           <div className="md:col-span-2 grid grid-cols-2 gap-8">
             <div className="border-l border-gray-700 pl-6">
-              <p className="text-xs uppercase tracking-wider text-gray-500 mb-4">Branches mapped per run</p>
-              <AnimatedCounter target={11} />
+              <p className="text-xs uppercase tracking-wider text-gray-500 mb-4">Calls that reach humans</p>
+              <AnimatedCounter target={65} suffix="%" />
             </div>
             <div className="border-l border-gray-700 pl-6">
               <p className="text-xs uppercase tracking-wider text-gray-500 mb-4">Agents per penetration test</p>
