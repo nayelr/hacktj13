@@ -1136,6 +1136,233 @@ def build_call_analysis(
     return result
 
 
+def _clean_str_list(value, limit=10):
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            cleaned.append(text)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def compute_aggregate_metrics(results: list) -> dict:
+    """Compute developer-relevant metrics from a list of per-call result dicts."""
+    total = len(results)
+    if total == 0:
+        return {"total_calls": 0}
+
+    completed = 0
+    for r in results:
+        status = normalize_status_text(r.get("wait_status") or r.get("status") or "")
+        analysis_report = r.get("analysis_report") if isinstance(r.get("analysis_report"), dict) else {}
+        task_outcome = normalize_status_text((analysis_report or {}).get("task_outcome") or "")
+        if status in {"completed", "done", "ended"} or task_outcome == "completed":
+            completed += 1
+
+    all_issues = []
+    for r in results:
+        all_issues.extend(r.get("issues_detected") or [])
+
+    total_issues = len(all_issues)
+    high = sum(1 for i in all_issues if re.search(r"\[high\]", str(i), re.IGNORECASE))
+    medium = sum(1 for i in all_issues if re.search(r"\[medium\]", str(i), re.IGNORECASE))
+    low = sum(1 for i in all_issues if re.search(r"\[low\]", str(i), re.IGNORECASE))
+
+    calls_with_high = sum(
+        1 for r in results
+        if any(re.search(r"\[high\]", str(i or ""), re.IGNORECASE) for i in (r.get("issues_detected") or []))
+    )
+
+    durations = []
+    for r in results:
+        d = r.get("duration_seconds") if r.get("duration_seconds") is not None else r.get("elapsed_wait_seconds")
+        if d is not None:
+            try:
+                v = float(d)
+                if v >= 0:
+                    durations.append(v)
+            except (TypeError, ValueError):
+                pass
+
+    total_duration = sum(durations)
+    avg_duration = total_duration / len(durations) if durations else 0
+    short_calls = sum(1 for d in durations if d < 15)
+    long_calls = sum(1 for d in durations if d > 180)
+    total_minutes = total_duration / 60.0 if total_duration > 0 else 0
+    issue_density = round(total_issues / total_minutes, 2) if total_minutes > 0 else 0
+    tasks_with_zero = sum(1 for r in results if not (r.get("issues_detected") or []))
+
+    return {
+        "total_calls": total,
+        "task_completion_rate": round(completed / total * 100, 1),
+        "completed_calls": completed,
+        "calls_with_high_severity": calls_with_high,
+        "calls_with_high_severity_pct": round(calls_with_high / total * 100, 1),
+        "issue_density": issue_density,
+        "short_call_rate": round(short_calls / total * 100, 1),
+        "short_calls": short_calls,
+        "long_call_rate": round(long_calls / total * 100, 1),
+        "long_calls": long_calls,
+        "severity_distribution": {
+            "high": high,
+            "medium": medium,
+            "low": low,
+            "high_pct": round(high / total_issues * 100, 1) if total_issues > 0 else 0,
+            "medium_pct": round(medium / total_issues * 100, 1) if total_issues > 0 else 0,
+            "low_pct": round(low / total_issues * 100, 1) if total_issues > 0 else 0,
+        },
+        "tasks_with_zero_issues": tasks_with_zero,
+        "total_issues": total_issues,
+        "total_duration_seconds": round(total_duration, 1),
+        "average_duration_seconds": round(avg_duration, 1),
+    }
+
+
+def run_openai_aggregate_analysis(results: list, business_description: str, metrics: dict) -> dict:
+    """Single LLM pass over all call results to produce a consolidated report."""
+    model = os.getenv("OPENAI_ANALYSIS_MODEL", DEFAULT_OPENAI_ANALYSIS_MODEL)
+
+    call_summaries = []
+    for i, r in enumerate(results, 1):
+        task = str(r.get("task") or f"Call {i}").strip()
+        status = normalize_status_text(r.get("wait_status") or r.get("status") or "unknown")
+        duration = r.get("duration_seconds") if r.get("duration_seconds") is not None else r.get("elapsed_wait_seconds")
+        issues = r.get("issues_detected") or []
+        transcript = r.get("transcript_excerpt") or []
+        analysis_report = r.get("analysis_report") if isinstance(r.get("analysis_report"), dict) else {}
+
+        parts = [f"Call {i} — Task: {task}"]
+        dur_str = (f", Duration: {round(float(duration), 1)}s" if duration is not None else "")
+        parts.append(f"  Status: {status}{dur_str}")
+        if analysis_report.get("task_outcome"):
+            parts.append(f"  Outcome: {analysis_report['task_outcome']}")
+        if analysis_report.get("summary"):
+            parts.append(f"  Summary: {str(analysis_report['summary'])[:300]}")
+        if issues:
+            parts.append(f"  Issues ({len(issues)}): " + "; ".join(str(x) for x in issues[:6]))
+        if transcript:
+            parts.append(f"  Transcript excerpt: " + " | ".join(str(x) for x in transcript[:3]))
+        call_summaries.append("\n".join(parts))
+
+    calls_text = "\n\n".join(call_summaries)[:20000]
+    sev = metrics.get("severity_distribution") or {}
+    metric_lines = [
+        f"Total calls: {metrics.get('total_calls')}",
+        f"Task completion rate: {metrics.get('task_completion_rate')}%",
+        f"Total issues: {metrics.get('total_issues')}",
+        f"High-severity issues: {sev.get('high', 0)} ({sev.get('high_pct', 0)}%)",
+        f"Calls with high-severity: {metrics.get('calls_with_high_severity')} ({metrics.get('calls_with_high_severity_pct')}%)",
+        f"Average call duration: {metrics.get('average_duration_seconds')}s",
+        f"Short calls (<15s): {metrics.get('short_calls')} ({metrics.get('short_call_rate')}%)",
+        f"Long calls (>3 min): {metrics.get('long_calls')} ({metrics.get('long_call_rate')}%)",
+    ]
+
+    system_prompt = (
+        "You are a senior QA analyst reviewing a full penetration test of an automated phone system (IVR/voice bot). "
+        "Produce one consolidated report for a developer who must improve the system. "
+        "Return JSON only with this exact schema: {"
+        "\"executive_summary\": string (2-4 sentence narrative for a developer audience), "
+        "\"issues\": [{\"severity\":\"high\"|\"medium\"|\"low\",\"theme\":string,\"title\":string,"
+        "\"description\":string,\"call_count\":number,\"evidence\":string}], "
+        "\"recommendations\": [string] (3-7 actionable bullets for the developer), "
+        "\"themes\": [string] (ordered list of theme names used in the issues array)"
+        "}. "
+        "Group issues by theme (e.g. 'ASR / Recognition', 'Authentication', 'Call Flow', "
+        "'Error Handling', 'Early Disconnect', 'Ambiguous Prompts'). "
+        "Deduplicate issues that appear in multiple calls and set call_count accordingly. "
+        "Order issues within each theme by severity (high first). "
+        "Be concrete and cite transcript evidence. Do not invent facts."
+    )
+    user_prompt = (
+        f"Business context:\n{business_description or '[not provided]'}\n\n"
+        f"Test metrics:\n" + "\n".join(metric_lines) + f"\n\nPer-call results:\n{calls_text}\n\n"
+        "Produce the consolidated penetration-test report."
+    )
+
+    report = openai_chat_completion(model, system_prompt, user_prompt)
+
+    issues = report.get("issues") or []
+    normalized_issues = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        sev_val = normalize_status_text(issue.get("severity") or "medium")
+        if sev_val not in {"high", "medium", "low"}:
+            sev_val = "medium"
+        call_count_val = 1
+        try:
+            call_count_val = max(1, int(issue.get("call_count") or 1))
+        except (TypeError, ValueError):
+            pass
+        normalized_issues.append({
+            "severity": sev_val,
+            "theme": str(issue.get("theme") or "General").strip(),
+            "title": str(issue.get("title") or "Issue").strip(),
+            "description": str(issue.get("description") or "").strip(),
+            "call_count": call_count_val,
+            "evidence": str(issue.get("evidence") or "").strip(),
+        })
+
+    recommendations = _clean_str_list(report.get("recommendations"))
+    themes = _clean_str_list(report.get("themes"))
+    if not themes:
+        themes = list(dict.fromkeys(i["theme"] for i in normalized_issues))
+
+    executive_summary = str(report.get("executive_summary") or "").strip()
+    if not executive_summary:
+        executive_summary = "Penetration test analysis completed."
+
+    return {
+        "executive_summary": executive_summary,
+        "issues": normalized_issues,
+        "recommendations": recommendations,
+        "themes": themes,
+        "unique_issue_themes": len(themes),
+    }
+
+
+def build_fallback_aggregate_report(results: list, metrics: dict) -> dict:
+    """Basic aggregate report when OpenAI is unavailable."""
+    seen: set = set()
+    deduped_issues = []
+    for r in results:
+        for issue in (r.get("issues_detected") or []):
+            key = str(issue).strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                deduped_issues.append({
+                    "severity": "medium",
+                    "theme": "General",
+                    "title": str(issue).strip(),
+                    "description": "",
+                    "call_count": 1,
+                    "evidence": "",
+                })
+
+    total = metrics.get("total_calls", 0)
+    comp = metrics.get("task_completion_rate", 0)
+    ti = metrics.get("total_issues", 0)
+    executive_summary = (
+        f"Penetration test completed {total} call(s) with a {comp}% task completion rate. "
+        f"A total of {ti} issues were detected across all calls."
+    )
+    return {
+        "executive_summary": executive_summary,
+        "issues": deduped_issues[:20],
+        "recommendations": [
+            "Review all high-severity issues first.",
+            "Manually reproduce each failing task flow to confirm the problems.",
+            "Add clearer error-handling and confirmation steps to the IVR.",
+        ],
+        "themes": ["General"],
+        "unique_issue_themes": 1,
+    }
+
+
 _pending_analyses: dict = {}
 _pending_analyses_lock = threading.Lock()
 
@@ -1716,6 +1943,32 @@ def cancel_batch_calls():
             "terminations": terminations,
         }
     )
+
+
+@app.route("/api/report/aggregate", methods=["POST"])
+def aggregate_report():
+    """Generate a consolidated penetration-test report from all per-call results."""
+    data = request.get_json() or {}
+    results = data.get("results") or []
+    business_description = str(data.get("description") or "").strip()[:5000]
+
+    if not results:
+        return jsonify({"error": "No results provided."}), 400
+
+    metrics = compute_aggregate_metrics(results)
+
+    report = None
+    report_error = None
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            report = run_openai_aggregate_analysis(results, business_description, metrics)
+        except Exception as exc:
+            report_error = str(exc)
+
+    if not report:
+        report = build_fallback_aggregate_report(results, metrics)
+
+    return jsonify({"ok": True, "report": report, "metrics": metrics, "report_error": report_error})
 
 
 if __name__ == "__main__":

@@ -11,6 +11,48 @@ type RunConfig = {
   tasks: string[];
 };
 
+type AggregateIssue = {
+  severity: "high" | "medium" | "low";
+  theme: string;
+  title: string;
+  description: string;
+  call_count?: number;
+  evidence?: string;
+};
+
+type AggregateReport = {
+  executive_summary: string;
+  issues: AggregateIssue[];
+  recommendations: string[];
+  themes: string[];
+  unique_issue_themes: number;
+};
+
+type AggregateMetrics = {
+  total_calls: number;
+  task_completion_rate: number;
+  completed_calls: number;
+  calls_with_high_severity: number;
+  calls_with_high_severity_pct: number;
+  issue_density: number;
+  short_call_rate: number;
+  short_calls: number;
+  long_call_rate: number;
+  long_calls: number;
+  severity_distribution: {
+    high: number;
+    medium: number;
+    low: number;
+    high_pct: number;
+    medium_pct: number;
+    low_pct: number;
+  };
+  tasks_with_zero_issues: number;
+  total_issues: number;
+  total_duration_seconds: number;
+  average_duration_seconds: number;
+};
+
 type AgentCardState = {
   index: number;
   task: string;
@@ -617,6 +659,34 @@ function LivePage({
   );
 }
 
+function MetricCard({
+  label,
+  value,
+  sub,
+  color,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  color: "green" | "amber" | "red" | "neutral";
+}) {
+  const valueColor =
+    color === "green"
+      ? "text-[var(--calpen-green)]"
+      : color === "amber"
+        ? "text-[var(--calpen-amber)]"
+        : color === "red"
+          ? "text-[var(--calpen-red)]"
+          : "text-white";
+  return (
+    <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 px-4 py-4">
+      <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-1">{label}</p>
+      <p className={`font-serif text-2xl font-light ${valueColor}`}>{value}</p>
+      {sub && <p className="font-serif text-xs text-gray-600 mt-0.5">{sub}</p>}
+    </div>
+  );
+}
+
 function ReportPage({
   cfg,
   results,
@@ -626,57 +696,58 @@ function ReportPage({
   results: AgentCardState[];
   onReset: () => void;
 }) {
-  const metrics = useMemo(() => {
-    const initiated = results.length;
-    const totalDuration = results.reduce((sum, r) => sum + getAgentDuration(r), 0);
-    const averageDuration = initiated > 0 ? totalDuration / initiated : 0;
-    const totalIssues = results.reduce((sum, r) => sum + (r.result?.issues_detected?.length || 0), 0);
-    const durations = results.map((r) => getAgentDuration(r));
-    const maxDuration = Math.max(0, ...durations);
-    const issueCounts = results.map((r) => r.result?.issues_detected?.length || 0);
-    const maxIssues = Math.max(0, ...issueCounts);
-    return { initiated, totalDuration, averageDuration, totalIssues, maxDuration, maxIssues };
-  }, [results]);
+  const [aggregateReport, setAggregateReport] = useState<AggregateReport | null>(null);
+  const [aggMetrics, setAggMetrics] = useState<AggregateMetrics | null>(null);
+  const [reportLoading, setReportLoading] = useState(true);
+  const [reportError, setReportError] = useState("");
 
-  const severityCounts = useMemo(() => {
-    const counts = { high: 0, medium: 0, low: 0, unknown: 0 };
-    results.forEach((r) => {
-      (r.result?.issues_detected || []).forEach((text) => {
-        const s = parseSeverity(text);
-        counts[s] += 1;
-      });
-    });
-    return counts;
-  }, [results]);
+  useEffect(() => {
+    let cancelled = false;
+    const fetchReport = async () => {
+      try {
+        const payload = results.map((agent) => ({
+          task: agent.task,
+          status: agent.result?.wait_status || agent.result?.status,
+          duration_seconds: agent.result?.duration_seconds,
+          elapsed_wait_seconds: agent.result?.elapsed_wait_seconds,
+          issues_detected: agent.result?.issues_detected || [],
+          transcript_excerpt: agent.result?.transcript_excerpt || [],
+          analysis_report: agent.result?.analysis_report,
+          result_summary: agent.result?.result_summary,
+        }));
+        const data = await postJson("/api/report/aggregate", {
+          results: payload,
+          description: cfg.description,
+        });
+        if (cancelled) return;
+        setAggregateReport(data.report);
+        setAggMetrics(data.metrics);
+      } catch (err) {
+        if (!cancelled) setReportError(err instanceof Error ? err.message : "Failed to generate report.");
+      } finally {
+        if (!cancelled) setReportLoading(false);
+      }
+    };
+    fetchReport();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const agentSummaries = useMemo(
-    () =>
-      results.map((r) => {
-        const issues = r.result?.issues_detected || [];
-        const severities = issues.map(parseSeverity);
-        const worstSeverity: Severity =
-          severities.includes("high") ? "high" : severities.includes("medium") ? "medium" : severities.includes("low") ? "low" : "unknown";
-        return {
-          index: r.index,
-          task: r.task,
-          duration: getAgentDuration(r),
-          issueCount: issues.length,
-          worstSeverity,
-        };
-      }),
-    [results]
-  );
+  const issuesByTheme = useMemo(() => {
+    if (!aggregateReport) return {} as Record<string, AggregateIssue[]>;
+    const grouped: Record<string, AggregateIssue[]> = {};
+    for (const issue of aggregateReport.issues) {
+      const theme = issue.theme || "General";
+      if (!grouped[theme]) grouped[theme] = [];
+      grouped[theme].push(issue);
+    }
+    return grouped;
+  }, [aggregateReport]);
 
-  const [expandedAgents, setExpandedAgents] = useState<Set<number>>(new Set());
-
-  const toggleAgent = (index: number) => {
-    setExpandedAgents((prev) => {
-      const next = new Set(prev);
-      if (next.has(index)) next.delete(index);
-      else next.add(index);
-      return next;
-    });
-  };
+  const orderedThemes = useMemo(() => {
+    if (!aggregateReport) return [];
+    const withIssues = aggregateReport.themes.filter((t) => issuesByTheme[t]);
+    return withIssues.length > 0 ? withIssues : Object.keys(issuesByTheme);
+  }, [aggregateReport, issuesByTheme]);
 
   return (
     <div className="relative min-h-screen">
@@ -686,219 +757,219 @@ function ReportPage({
       />
       <div className="absolute inset-0 bg-gradient-to-b from-[#13110e]/60 via-[#13110e]/40 to-[#13110e]" />
       <div className="py-9 px-6 md:px-11 max-w-5xl mx-auto relative z-10 text-white">
+
+        {/* Header */}
         <div className="pb-7 mb-8 border-b border-gray-700">
-          <h2 className="font-serif text-3xl md:text-4xl font-bold text-white tracking-tight">Audit report</h2>
+          <h2 className="font-serif text-3xl md:text-4xl font-bold text-white tracking-tight">Penetration test report</h2>
           <p className="text-gray-400 text-base mt-2 font-serif">
             {cfg.phone} · {cfg.description}
             <br />
-            {new Date().toLocaleString()} · {cfg.numAgents} agents
+            {new Date().toLocaleString()} · {cfg.numAgents} agents · {cfg.tasks.join(", ")}
           </p>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 pl-6 py-4 pr-4">
-            <p className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-2">Initiated</p>
-            <p className="font-serif text-3xl md:text-4xl font-light text-white">{metrics.initiated}</p>
-          </div>
-          <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 pl-6 py-4 pr-4">
-            <p className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-2">Total call duration</p>
-            <p className="font-serif text-3xl md:text-4xl font-light text-[var(--calpen-green)]">{formatSeconds(metrics.totalDuration)}</p>
-          </div>
-          <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 pl-6 py-4 pr-4">
-            <p className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-2">Average call duration</p>
-            <p className="font-serif text-3xl md:text-4xl font-light text-white">{formatSeconds(metrics.averageDuration)}</p>
-          </div>
-          <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 pl-6 py-4 pr-4">
-            <p className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-2">Issues detected</p>
-            <p className="font-serif text-3xl md:text-4xl font-light text-white">{metrics.totalIssues}</p>
-          </div>
-        </div>
-
-        {metrics.totalIssues > 0 && (
+        {/* Metrics grid — shown immediately from backend once available */}
+        {aggMetrics && (
           <div className="mb-8">
-            <p className="font-serif text-sm text-gray-300 mb-2">
-              {metrics.totalIssues} issues: {severityCounts.high} high, {severityCounts.medium} medium, {severityCounts.low} low
-              {severityCounts.unknown > 0 ? `, ${severityCounts.unknown} other` : ""}
-            </p>
-            <div className="h-2 rounded-full overflow-hidden flex bg-gray-800 border border-gray-700">
-              {severityCounts.high > 0 && (
-                <div
-                  className="h-full bg-[var(--calpen-red)]"
-                  style={{ width: `${(severityCounts.high / metrics.totalIssues) * 100}%` }}
-                />
-              )}
-              {severityCounts.medium > 0 && (
-                <div
-                  className="h-full bg-[var(--calpen-amber)]"
-                  style={{ width: `${(severityCounts.medium / metrics.totalIssues) * 100}%` }}
-                />
-              )}
-              {severityCounts.low > 0 && (
-                <div
-                  className="h-full bg-gray-500"
-                  style={{ width: `${(severityCounts.low / metrics.totalIssues) * 100}%` }}
-                />
-              )}
-              {severityCounts.unknown > 0 && (
-                <div
-                  className="h-full bg-gray-600"
-                  style={{ width: `${(severityCounts.unknown / metrics.totalIssues) * 100}%` }}
-                />
-              )}
+            <h3 className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-3">Key metrics</h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+              <MetricCard
+                label="Task completion"
+                value={`${aggMetrics.task_completion_rate}%`}
+                sub={`${aggMetrics.completed_calls} / ${aggMetrics.total_calls} calls`}
+                color={aggMetrics.task_completion_rate >= 80 ? "green" : aggMetrics.task_completion_rate >= 50 ? "amber" : "red"}
+              />
+              <MetricCard
+                label="High-severity calls"
+                value={String(aggMetrics.calls_with_high_severity)}
+                sub={`${aggMetrics.calls_with_high_severity_pct}% of calls`}
+                color={aggMetrics.calls_with_high_severity === 0 ? "green" : "red"}
+              />
+              <MetricCard
+                label="Issue density"
+                value={`${aggMetrics.issue_density}`}
+                sub="issues / min of talk"
+                color={aggMetrics.issue_density < 1 ? "green" : aggMetrics.issue_density < 3 ? "amber" : "red"}
+              />
+              <MetricCard
+                label="Avg call duration"
+                value={formatSeconds(aggMetrics.average_duration_seconds)}
+                sub={`${formatSeconds(aggMetrics.total_duration_seconds)} total`}
+                color="neutral"
+              />
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <MetricCard
+                label="Short calls (<15s)"
+                value={`${aggMetrics.short_call_rate}%`}
+                sub={`${aggMetrics.short_calls} calls — possible dead-ends`}
+                color={aggMetrics.short_call_rate < 10 ? "green" : aggMetrics.short_call_rate < 30 ? "amber" : "red"}
+              />
+              <MetricCard
+                label="Long calls (>3 min)"
+                value={`${aggMetrics.long_call_rate}%`}
+                sub={`${aggMetrics.long_calls} calls — possible loops`}
+                color={aggMetrics.long_call_rate < 10 ? "green" : "amber"}
+              />
+              <MetricCard
+                label="Zero-issue tasks"
+                value={String(aggMetrics.tasks_with_zero_issues)}
+                sub={`of ${aggMetrics.total_calls} calls passed cleanly`}
+                color={aggMetrics.tasks_with_zero_issues > 0 ? "green" : "amber"}
+              />
+              <MetricCard
+                label="Severity split"
+                value={`${aggMetrics.severity_distribution.high}H · ${aggMetrics.severity_distribution.medium}M · ${aggMetrics.severity_distribution.low}L`}
+                sub={`${aggMetrics.total_issues} total issues`}
+                color={aggMetrics.severity_distribution.high === 0 ? "green" : "red"}
+              />
             </div>
           </div>
         )}
 
-        <div className="mb-8">
-          <h3 className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-3">By agent</h3>
-          <div className="space-y-3">
-            {agentSummaries.map((s) => (
-              <div
-                key={`branch-${s.index}`}
-                className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-800 bg-black/40 backdrop-blur-sm px-4 py-3"
-              >
-                <span className="font-serif text-sm font-medium text-white shrink-0">Agent {s.index} · {s.task}</span>
-                <div className="flex-1 min-w-[120px] h-2 rounded-full bg-gray-800 overflow-hidden border border-gray-700">
-                  {metrics.maxDuration > 0 && (
-                    <div
-                      className="h-full bg-[var(--calpen-green)]/60 rounded-full"
-                      style={{ width: `${(s.duration / metrics.maxDuration) * 100}%` }}
-                    />
-                  )}
-                </div>
-                <span className="font-serif text-xs text-gray-400 shrink-0">{formatSeconds(s.duration)}</span>
-                <span className="font-serif text-xs text-gray-400 shrink-0">{s.issueCount} issues</span>
-                <span
-                  className={`inline-block w-2 h-2 rounded-full shrink-0 ${
-                    s.worstSeverity === "high"
-                      ? "bg-[var(--calpen-red)]"
-                      : s.worstSeverity === "medium"
-                        ? "bg-[var(--calpen-amber)]"
-                        : "bg-gray-500"
-                  }`}
-                  title={s.worstSeverity}
-                />
-              </div>
-            ))}
+        {/* Consolidated report — loading / error states */}
+        {reportLoading && (
+          <div className="mb-8 p-6 bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 text-center">
+            <p className="font-serif text-gray-400 animate-pulse">Generating consolidated report…</p>
           </div>
-        </div>
-
-        {(metrics.maxDuration > 0 || metrics.maxIssues > 0) && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-            {metrics.maxDuration > 0 && (
-              <div>
-                <h3 className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-3">Duration per agent</h3>
-                <div className="space-y-2">
-                  {agentSummaries.map((s) => (
-                    <div key={`dur-${s.index}`} className="flex items-center gap-3">
-                      <span className="font-serif text-sm text-gray-300 w-32 shrink-0 truncate" title={s.task}>{s.task}</span>
-                      <div className="flex-1 h-2 rounded-full bg-gray-800 overflow-hidden border border-gray-700">
-                        <div
-                          className="h-full bg-[var(--calpen-green)]/60 rounded-full"
-                          style={{ width: `${(s.duration / metrics.maxDuration) * 100}%` }}
-                        />
-                      </div>
-                      <span className="font-serif text-xs text-gray-400 w-12 shrink-0">{formatSeconds(s.duration)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {metrics.maxIssues > 0 && (
-              <div>
-                <h3 className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-3">Issues per agent</h3>
-                <div className="space-y-2">
-                  {agentSummaries.map((s) => (
-                    <div key={`iss-${s.index}`} className="flex items-center gap-3">
-                      <span className="font-serif text-sm text-gray-300 w-32 shrink-0 truncate" title={s.task}>{s.task}</span>
-                      <div className="flex-1 h-2 rounded-full bg-gray-800 overflow-hidden border border-gray-700">
-                        <div
-                          className="h-full bg-[var(--calpen-red)]/50 rounded-full"
-                          style={{ width: `${metrics.maxIssues > 0 ? (s.issueCount / metrics.maxIssues) * 100 : 0}%` }}
-                        />
-                      </div>
-                      <span className="font-serif text-xs text-gray-400 w-8 shrink-0">{s.issueCount}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+        )}
+        {reportError && !reportLoading && (
+          <div className="mb-6 p-4 bg-red-900/20 rounded-xl border border-red-800/40">
+            <p className="font-serif text-sm text-red-400">{reportError}</p>
           </div>
         )}
 
-        <div className="space-y-4 mb-8">
-          {results.map((agent) => {
-            const issues = agent.result?.issues_detected || [];
-            const sortedIssues = [...issues].sort((a, b) => {
-              const order: Record<Severity, number> = { high: 0, medium: 1, low: 2, unknown: 3 };
-              return order[parseSeverity(a)] - order[parseSeverity(b)];
-            });
-            const high = issues.filter((i) => parseSeverity(i) === "high").length;
-            const medium = issues.filter((i) => parseSeverity(i) === "medium").length;
-            const low = issues.filter((i) => parseSeverity(i) === "low").length;
-            const severityBreakdown = issues.length
-              ? `${issues.length} issues (${high} high, ${medium} medium, ${low} low)`
-              : "0 issues";
-            const isExpanded = expandedAgents.has(agent.index);
+        {aggregateReport && (
+          <>
+            {/* Executive summary */}
+            <div className="mb-8 p-6 bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700">
+              <h3 className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-3">Executive summary</h3>
+              <p className="font-serif text-base text-gray-200 leading-relaxed">
+                {aggregateReport.executive_summary}
+              </p>
+            </div>
 
-            return (
-              <div
-                key={`report-${agent.index}`}
-                id={`agent-${agent.index}`}
-                className="rounded-xl border border-gray-800 bg-black/40 backdrop-blur-sm overflow-hidden"
-              >
-                <button
-                  type="button"
-                  onClick={() => toggleAgent(agent.index)}
-                  className="w-full text-left p-6 flex flex-wrap items-center justify-between gap-2"
-                >
-                  <div>
-                    <p className="font-serif text-lg font-semibold text-white mb-1">
-                      Agent {agent.index} · {agent.task}
-                    </p>
-                    <p className="font-serif text-sm text-gray-400">
-                      {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)} · {severityBreakdown}
-                    </p>
-                    {agent.result?.analysis_pending ? <p className="font-serif text-xs text-[var(--calpen-amber)] mt-1">Post-call analysis pending...</p> : null}
-                  </div>
-                  <span className="font-serif text-sm text-gray-500">
-                    {isExpanded ? "Hide details" : "Show details"}
-                  </span>
-                </button>
-                {isExpanded && (
-                  <div className="px-6 pb-6 pt-0 border-t border-gray-800 max-w-prose">
-                    {agent.result?.result_summary ? (
-                      <p className="font-serif text-base text-gray-200 mb-4 leading-relaxed">
-                        {agent.result.result_summary}
-                      </p>
-                    ) : null}
-                    <div className="space-y-2">
-                      {sortedIssues.map((issue, idx) => {
-                        const sev = parseSeverity(issue);
-                        const label = sev.charAt(0).toUpperCase() + sev.slice(1);
-                        const pillClass =
-                          sev === "high"
-                            ? "bg-[var(--calpen-red)]/20 text-[var(--calpen-red)] border-[var(--calpen-red)]/40"
-                            : sev === "medium"
-                              ? "bg-[var(--calpen-amber)]/20 text-[var(--calpen-amber)] border-[var(--calpen-amber)]/40"
-                              : sev === "low"
-                                ? "bg-gray-500/20 text-gray-400 border-gray-500/40"
-                                : "bg-gray-600/20 text-gray-500 border-gray-600/40";
-                        return (
-                          <p key={`issue-${agent.index}-${idx}`} className="font-serif text-sm leading-relaxed flex items-baseline gap-2">
-                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium border ${pillClass}`}>
-                              {label}
-                            </span>
-                            <span className="text-[var(--calpen-red)]">{issue.replace(/^\[(high|medium|low)\]\s*/i, "").trim()}</span>
-                          </p>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
+            {/* Issues grouped by theme */}
+            {aggregateReport.issues.length > 0 && (
+              <div className="mb-8">
+                <h3 className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-3">
+                  Findings · {aggregateReport.issues.length} issue{aggregateReport.issues.length !== 1 ? "s" : ""} across {orderedThemes.length} theme{orderedThemes.length !== 1 ? "s" : ""}
+                </h3>
+                <div className="space-y-4">
+                  {orderedThemes.map((theme) => {
+                    const themeIssues = issuesByTheme[theme] || [];
+                    if (!themeIssues.length) return null;
+                    const highCount = themeIssues.filter((i) => i.severity === "high").length;
+                    return (
+                      <div key={theme} className="rounded-xl border border-gray-800 bg-black/40 backdrop-blur-sm overflow-hidden">
+                        <div className="px-5 py-3 border-b border-gray-800 flex items-center gap-3">
+                          <h4 className="font-serif text-sm font-semibold text-white">{theme}</h4>
+                          <span className="text-xs text-gray-600">{themeIssues.length} issue{themeIssues.length !== 1 ? "s" : ""}</span>
+                          {highCount > 0 && (
+                            <span className="text-xs text-[var(--calpen-red)] ml-auto">{highCount} high</span>
+                          )}
+                        </div>
+                        <div className="p-4 space-y-3">
+                          {themeIssues.map((issue, idx) => {
+                            const pillClass =
+                              issue.severity === "high"
+                                ? "bg-[var(--calpen-red)]/20 text-[var(--calpen-red)] border-[var(--calpen-red)]/40"
+                                : issue.severity === "medium"
+                                  ? "bg-[var(--calpen-amber)]/20 text-[var(--calpen-amber)] border-[var(--calpen-amber)]/40"
+                                  : "bg-gray-500/20 text-gray-400 border-gray-500/40";
+                            return (
+                              <div key={idx} className="flex items-start gap-3">
+                                <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium border ${pillClass} mt-0.5`}>
+                                  {issue.severity.charAt(0).toUpperCase() + issue.severity.slice(1)}
+                                </span>
+                                <div className="min-w-0">
+                                  <p className="font-serif text-sm text-white font-medium">{issue.title}</p>
+                                  {issue.description && (
+                                    <p className="font-serif text-xs text-gray-400 mt-0.5 leading-relaxed">{issue.description}</p>
+                                  )}
+                                  {issue.evidence && (
+                                    <p className="font-serif text-xs text-gray-500 mt-0.5 italic">"{issue.evidence}"</p>
+                                  )}
+                                  {(issue.call_count ?? 0) > 1 && (
+                                    <p className="font-serif text-xs text-gray-600 mt-0.5">Seen in {issue.call_count} calls</p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-            );
-          })}
+            )}
+
+            {/* Recommendations */}
+            {aggregateReport.recommendations.length > 0 && (
+              <div className="mb-8 p-6 bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700">
+                <h3 className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-4">Recommendations</h3>
+                <ul className="space-y-2">
+                  {aggregateReport.recommendations.map((rec, idx) => (
+                    <li key={idx} className="font-serif text-sm text-gray-200 flex gap-3 leading-relaxed">
+                      <span className="text-gray-600 shrink-0 mt-0.5">→</span>
+                      {rec}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Compact per-call log */}
+        <div className="mb-8">
+          <h3 className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-3">Call log</h3>
+          <div className="rounded-xl border border-gray-800 bg-black/40 backdrop-blur-sm overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-800">
+                  <th className="font-serif text-xs uppercase tracking-wider text-gray-600 text-left px-4 py-3">Agent · Task</th>
+                  <th className="font-serif text-xs uppercase tracking-wider text-gray-600 text-right px-4 py-3">Duration</th>
+                  <th className="font-serif text-xs uppercase tracking-wider text-gray-600 text-right px-4 py-3">Status</th>
+                  <th className="font-serif text-xs uppercase tracking-wider text-gray-600 text-right px-4 py-3">Issues</th>
+                </tr>
+              </thead>
+              <tbody>
+                {results.map((agent, idx) => {
+                  const status = agent.result?.wait_status || agent.result?.status || agent.state;
+                  const issues = agent.result?.issues_detected || [];
+                  const highCount = issues.filter((i) => parseSeverity(i) === "high").length;
+                  const isOk = ["completed", "done", "ended"].includes(status);
+                  const isFail = status === "failed" || agent.state === "failed";
+                  return (
+                    <tr key={agent.index} className={idx < results.length - 1 ? "border-b border-gray-800/50" : ""}>
+                      <td className="font-serif px-4 py-3 text-gray-200">
+                        <span className="text-gray-600 mr-2">#{agent.index}</span>{agent.task}
+                      </td>
+                      <td className="font-serif px-4 py-3 text-gray-400 text-right tabular-nums">
+                        {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)}
+                      </td>
+                      <td className="font-serif px-4 py-3 text-right">
+                        <span className={`text-xs ${isOk ? "text-[var(--calpen-green)]" : isFail ? "text-[var(--calpen-red)]" : "text-gray-500"}`}>
+                          {status}
+                        </span>
+                      </td>
+                      <td className="font-serif px-4 py-3 text-right">
+                        {issues.length === 0 ? (
+                          <span className="text-xs text-gray-700">—</span>
+                        ) : (
+                          <span className={`text-xs ${highCount > 0 ? "text-[var(--calpen-red)]" : "text-[var(--calpen-amber)]"}`}>
+                            {issues.length}{highCount > 0 ? ` (${highCount}H)` : ""}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <button
