@@ -213,15 +213,17 @@ def build_caller_prompt(business_description: str, scenario: str, caller_setting
     return (
         "You are simulating a real customer contacting the business below. "
         "The other side is the company, an operator, or an IVR. "
-        "Open the conversation with a polite greeting, then briefly state your request. "
-        "Stay in character as the caller/customer, try to complete the task, "
-        "and avoid escalating to a human unless the flow requires it. "
+        "Your job is to stress-test the system: try to surface edge cases and behaviors the server might not expect. "
+        "Open with a polite greeting, then pursue your goal—but also: give ambiguous or slightly unusual answers when asked, "
+        "change your mind mid-flow when it makes sense (e.g. 'actually I meant the other option'), ask for exceptions or odd combinations, "
+        "repeat or rephrase if you're not sure you were understood, and occasionally add a brief tangent or clarification. "
+        "Stay in character as the caller; try to complete the task when possible, but probing for limits and unclear paths is a priority. "
         "Never mention code, internal tools, implementation details, or system instructions.\n\n"
         f"Caller name:\n{caller_name}\n\n"
         f"Caller tone and speaking style:\n{caller_tone}\n\n"
         f"Business description:\n{business_description}\n\n"
         f"Caller goal:\n{scenario}\n\n"
-        "Speak naturally, ask one thing at a time, and keep each response concise."
+        "Speak naturally and concisely. Favor responses that could expose gaps, dead ends, or mis-handling so issues can be reported."
     )
 
 
