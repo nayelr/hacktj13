@@ -12,7 +12,7 @@ export function CustomAgents() {
   return (
     <section id="how-it-works" className="bg-[#13110e] py-20 px-4">
       <div className="max-w-6xl mx-auto">
-        <div className="grid md:grid-cols-2 gap-12 items-start">
+        <div className="grid md:grid-cols-[minmax(0,280px)_1fr] lg:grid-cols-[minmax(0,320px)_1fr] gap-12 items-start">
           <div>
             <div className="flex items-center gap-2 mb-4">
               <span className="w-2 h-2 bg-orange-500 rounded-full" />
@@ -24,7 +24,7 @@ export function CustomAgents() {
               to a full audit
             </h2>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 min-w-0">
             {features.map((feature) => {
               const Icon = feature.icon;
               return (
