@@ -1242,10 +1242,12 @@ def run_openai_aggregate_analysis(results: list, business_description: str, metr
             parts.append(f"  Outcome: {analysis_report['task_outcome']}")
         if analysis_report.get("summary"):
             parts.append(f"  Summary: {str(analysis_report['summary'])[:300]}")
+        if analysis_report.get("key_findings"):
+            parts.append(f"  Key findings: {str(analysis_report['key_findings'])[:400]}")
         if issues:
-            parts.append(f"  Issues ({len(issues)}): " + "; ".join(str(x) for x in issues[:6]))
+            parts.append(f"  Issues ({len(issues)}): " + "; ".join(str(x) for x in issues[:10]))
         if transcript:
-            parts.append(f"  Transcript excerpt: " + " | ".join(str(x) for x in transcript[:3]))
+            parts.append(f"  Transcript excerpt:\n    " + "\n    ".join(str(x) for x in transcript[:8]))
         call_summaries.append("\n".join(parts))
 
     calls_text = "\n\n".join(call_summaries)[:20000]
@@ -1262,25 +1264,30 @@ def run_openai_aggregate_analysis(results: list, business_description: str, metr
     ]
 
     system_prompt = (
-        "You are a senior QA analyst reviewing a full penetration test of an automated phone system (IVR/voice bot). "
-        "Produce one consolidated report for a developer who must improve the system. "
+        "You are analyzing a penetration test of a company's automated phone system (IVR). "
+        "Your job is to clearly explain what worked, what failed, and exactly why. "
+        "Write for a non-technical product or operations manager who needs to understand the problems and fix them. "
         "Return JSON only with this exact schema: {"
-        "\"executive_summary\": string (2-4 sentence narrative for a developer audience), "
+        "\"executive_summary\": string (2-3 sentences max. State the overall pass/fail, the biggest problem found, and the impact on callers), "
         "\"issues\": [{\"severity\":\"high\"|\"medium\"|\"low\",\"theme\":string,\"title\":string,"
         "\"description\":string,\"call_count\":number,\"evidence\":string}], "
-        "\"recommendations\": [string] (3-7 actionable bullets for the developer), "
-        "\"themes\": [string] (ordered list of theme names used in the issues array)"
+        "\"recommendations\": [string], "
+        "\"themes\": [string]"
         "}. "
-        "Group issues by theme (e.g. 'ASR / Recognition', 'Authentication', 'Call Flow', "
-        "'Error Handling', 'Early Disconnect', 'Ambiguous Prompts'). "
-        "Deduplicate issues that appear in multiple calls and set call_count accordingly. "
-        "Order issues within each theme by severity (high first). "
-        "Be concrete and cite transcript evidence. Do not invent facts."
+        "For each ISSUE: "
+        "title must be a plain English problem statement (e.g. 'Phone system could not understand spoken dates'). "
+        "description must explain in one sentence what the system did wrong, one sentence on what the caller was trying to do, and one sentence on what happens to the caller as a result. "
+        "evidence must be a direct quote from the transcript showing the failure. "
+        "severity is high if the caller cannot complete their task, medium if the task is completed but with significant friction, low if minor inconvenience. "
+        "For each RECOMMENDATION: write one specific action to fix one specific issue. "
+        "Name the exact thing to change (e.g. 'Allow callers to say dates naturally like next Tuesday or March 15th, not just Month Day format'). "
+        "Never write a generic recommendation. Every recommendation must trace back to a specific failure in the transcript. "
+        "Group issues by theme. Order by severity high first. Deduplicate issues that appear across multiple calls."
     )
     user_prompt = (
         f"Business context:\n{business_description or '[not provided]'}\n\n"
         f"Test metrics:\n" + "\n".join(metric_lines) + f"\n\nPer-call results:\n{calls_text}\n\n"
-        "Produce the consolidated penetration-test report."
+        "Produce the consolidated penetration-test report. Be specific — quote transcripts, name exact failures."
     )
 
     report = openai_chat_completion(model, system_prompt, user_prompt)
