@@ -386,20 +386,28 @@ def _elevenlabs_request(path: str, method: str = "GET", body: dict = None):
         api_request = Request(url, data=data, headers=headers, method=method)
     else:
         api_request = Request(url, headers=headers, method=method)
-    try:
-        with urlopen(api_request, timeout=30) as response:
-            raw_body = response.read().decode("utf-8")
-            return json.loads(raw_body) if raw_body else {}
-    except HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
+    max_retries = 2
+    for attempt in range(max_retries + 1):
         try:
-            parsed_body = json.loads(error_body)
-        except json.JSONDecodeError:
-            parsed_body = {"error": error_body or exc.reason}
-        error_message = parsed_body.get("detail") or parsed_body.get("error") or exc.reason
-        raise RuntimeError(f"ElevenLabs API error ({exc.code}): {error_message}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Could not reach ElevenLabs: {exc.reason}") from exc
+            with urlopen(api_request, timeout=30) as response:
+                raw_body = response.read().decode("utf-8")
+                return json.loads(raw_body) if raw_body else {}
+        except HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            try:
+                parsed_body = json.loads(error_body)
+            except json.JSONDecodeError:
+                parsed_body = {"error": error_body or exc.reason}
+            error_message = parsed_body.get("detail") or parsed_body.get("error") or exc.reason
+            raise RuntimeError(f"ElevenLabs API error ({exc.code}): {error_message}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Could not reach ElevenLabs: {exc.reason}") from exc
+        except OSError as exc:
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            raise RuntimeError(f"ElevenLabs request timed out: {exc}") from exc
+    return {}
 
 
 def _openai_request(path: str, body: dict):
@@ -413,20 +421,28 @@ def _openai_request(path: str, body: dict):
     }
     payload = json.dumps(body).encode("utf-8")
     request_obj = Request(url, data=payload, headers=headers, method="POST")
-    try:
-        with urlopen(request_obj, timeout=45) as response:
-            raw_body = response.read().decode("utf-8")
-            return json.loads(raw_body) if raw_body else {}
-    except HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
+    max_retries = 2
+    for attempt in range(max_retries + 1):
         try:
-            parsed_body = json.loads(error_body)
-        except json.JSONDecodeError:
-            parsed_body = {"error": error_body or exc.reason}
-        error_message = parsed_body.get("error") or parsed_body.get("detail") or exc.reason
-        raise RuntimeError(f"OpenAI API error ({exc.code}): {error_message}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Could not reach OpenAI: {exc.reason}") from exc
+            with urlopen(request_obj, timeout=60) as response:
+                raw_body = response.read().decode("utf-8")
+                return json.loads(raw_body) if raw_body else {}
+        except HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            try:
+                parsed_body = json.loads(error_body)
+            except json.JSONDecodeError:
+                parsed_body = {"error": error_body or exc.reason}
+            error_message = parsed_body.get("error") or parsed_body.get("detail") or exc.reason
+            raise RuntimeError(f"OpenAI API error ({exc.code}): {error_message}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Could not reach OpenAI: {exc.reason}") from exc
+        except OSError as exc:
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            raise RuntimeError(f"OpenAI request timed out: {exc}") from exc
+    return {}
 
 
 def openai_chat_completion(model: str, system_prompt: str, user_prompt: str):
@@ -1085,7 +1101,48 @@ def build_call_analysis(task: str, entry: dict, lifecycle_payload: dict, detail_
     return result
 
 
-def run_single_batch_call(business_description: str, to_number: str, task: str, voice_ids=None, run_id: str = ""):
+_pending_analyses: dict = {}
+_pending_analyses_lock = threading.Lock()
+
+
+def _run_post_call_analysis(analysis_id: str, task: str, entry: dict, wait_result: dict, run_id: str):
+    """Background worker: fetch conversation details + run OpenAI analysis."""
+    try:
+        detail_payloads = fetch_conversation_detail_payloads(
+            call_sid=entry.get("call_sid"),
+            conversation_id=entry.get("conversation_id"),
+        )
+        if entry.get("duration_seconds") is None:
+            for p in detail_payloads:
+                parsed_duration = extract_duration_seconds(p or {})
+                if parsed_duration is not None:
+                    entry["duration_seconds"] = parsed_duration
+                    break
+        if entry.get("duration_seconds") is None:
+            elapsed_wait = entry.get("elapsed_wait_seconds")
+            if elapsed_wait is not None:
+                try:
+                    elapsed_val = float(elapsed_wait)
+                    if elapsed_val >= 0:
+                        entry["duration_seconds"] = round(elapsed_val, 2)
+                except (TypeError, ValueError):
+                    pass
+        analysis = build_call_analysis(
+            task=task,
+            entry=entry,
+            lifecycle_payload=wait_result.get("raw") or {},
+            detail_payloads=detail_payloads,
+        )
+        entry.update(analysis)
+    except Exception as exc:
+        entry["analysis_error"] = str(exc)
+    finally:
+        _unregister_active_call(run_id, entry.get("call_sid"), entry.get("conversation_id"))
+        with _pending_analyses_lock:
+            _pending_analyses[analysis_id] = entry
+
+
+def run_single_batch_call(business_description: str, to_number: str, task: str, voice_ids=None, run_id: str = "", async_analysis: bool = False):
     scenario = task.strip()
     if run_id and _is_run_cancelled(run_id):
         return {
@@ -1129,28 +1186,44 @@ def run_single_batch_call(business_description: str, to_number: str, task: str, 
     entry["call_sid"] = call_response.get("call_sid") or call_response.get("callSid")
     entry["conversation_id"] = call_response.get("conversation_id") or call_response.get("conversationId")
     _register_active_call(run_id, entry.get("call_sid"), entry.get("conversation_id"))
-    try:
-        wait_result = wait_for_call_completion(
-            call_sid=entry.get("call_sid"),
-            conversation_id=entry.get("conversation_id"),
-            run_id=run_id,
+
+    wait_result = wait_for_call_completion(
+        call_sid=entry.get("call_sid"),
+        conversation_id=entry.get("conversation_id"),
+        run_id=run_id,
+    )
+    entry["wait_status"] = wait_result["status"]
+    entry["wait_timed_out"] = wait_result["timed_out"]
+    entry["duration_seconds"] = wait_result.get("duration_seconds")
+    entry["elapsed_wait_seconds"] = wait_result.get("elapsed_wait_seconds")
+    if wait_result["status"] == "cancelled":
+        entry["status"] = "cancelled"
+        entry["result_summary"] = "Cancelled by user while call was in progress."
+        entry["issues_detected"] = []
+        _unregister_active_call(run_id, entry.get("call_sid"), entry.get("conversation_id"))
+        return entry
+
+    if async_analysis:
+        import uuid as _uuid
+        analysis_id = _uuid.uuid4().hex
+        entry["analysis_pending"] = True
+        entry["analysis_id"] = analysis_id
+        t = threading.Thread(
+            target=_run_post_call_analysis,
+            args=(analysis_id, task, dict(entry), wait_result, run_id),
+            daemon=True,
         )
-        entry["wait_status"] = wait_result["status"]
-        entry["wait_timed_out"] = wait_result["timed_out"]
-        entry["duration_seconds"] = wait_result.get("duration_seconds")
-        entry["elapsed_wait_seconds"] = wait_result.get("elapsed_wait_seconds")
-        if wait_result["status"] == "cancelled":
-            entry["status"] = "cancelled"
-            entry["result_summary"] = "Cancelled by user while call was in progress."
-            entry["issues_detected"] = []
-            return entry
+        t.start()
+        return entry
+
+    try:
         detail_payloads = fetch_conversation_detail_payloads(
             call_sid=entry.get("call_sid"),
             conversation_id=entry.get("conversation_id"),
         )
         if entry.get("duration_seconds") is None:
-            for payload in detail_payloads:
-                parsed_duration = extract_duration_seconds(payload or {})
+            for p in detail_payloads:
+                parsed_duration = extract_duration_seconds(p or {})
                 if parsed_duration is not None:
                     entry["duration_seconds"] = parsed_duration
                     break
@@ -1541,11 +1614,24 @@ def start_single_batch_call():
 
     voice_ids = get_available_voice_ids()
     try:
-        entry = run_single_batch_call(business_description, to_number, task, voice_ids=voice_ids, run_id=run_id)
+        entry = run_single_batch_call(business_description, to_number, task, voice_ids=voice_ids, run_id=run_id, async_analysis=True)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
     return jsonify({"ok": entry.get("status") != "failed", "result": entry})
+
+
+@app.route("/api/call/batch/one/analysis", methods=["GET"])
+def poll_single_batch_analysis():
+    """Poll for the async analysis result of a single batch call."""
+    analysis_id = request.args.get("id", "").strip()
+    if not analysis_id:
+        return jsonify({"error": "Missing id parameter."}), 400
+    with _pending_analyses_lock:
+        result = _pending_analyses.pop(analysis_id, None)
+    if result is None:
+        return jsonify({"ready": False})
+    return jsonify({"ready": True, "result": result})
 
 
 @app.route("/api/call/batch/cancel", methods=["POST"])

@@ -50,6 +50,33 @@ function formatSeconds(value: number | null | undefined) {
   return `${Number(value).toFixed(1)}s`;
 }
 
+type Severity = "high" | "medium" | "low" | "unknown";
+
+function parseSeverity(issueText: string): Severity {
+  const match = issueText.match(/^\[(high|medium|low)\]/i);
+  if (!match) return "unknown";
+  return match[1].toLowerCase() as Severity;
+}
+
+function getAgentDuration(r: AgentCardState): number {
+  let v = Number(r.result?.duration_seconds);
+  if (Number.isNaN(v) || v < 0) v = Number(r.result?.elapsed_wait_seconds);
+  return Number.isNaN(v) || v < 0 ? 0 : v;
+}
+
+async function pollAnalysis(analysisId: string, timeoutMs = 120000): Promise<Record<string, unknown> | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(apiUrl(`/api/call/batch/one/analysis?id=${analysisId}`), { credentials: "include" });
+      const data = await res.json();
+      if (data?.ready) return data.result;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return null;
+}
+
 function parseTasks(raw: string) {
   return raw
     .split(/\n+/)
@@ -337,6 +364,7 @@ function LivePage({
           }, ac.signal);
           if (cancelledRef.current) return;
           const result = data?.result || {};
+          const analysisId = result.analysis_id as string | undefined;
           currentAgents = currentAgents.map((agent) =>
             agent.index === idx
               ? {
@@ -348,6 +376,17 @@ function LivePage({
               : agent
           );
           setAgents([...currentAgents]);
+          if (analysisId) {
+            const capturedIdx = idx;
+            pollAnalysis(analysisId).then((analysisResult) => {
+              if (!analysisResult || cancelledRef.current) return;
+              setAgents((prev) =>
+                prev.map((a) =>
+                  a.index === capturedIdx ? { ...a, result: { ...a.result, ...(analysisResult as AgentCardState["result"]) } } : a
+                )
+              );
+            });
+          }
         } catch (err) {
           if (isAbortError(err) || cancelledRef.current) return;
           if (skipRef.current) {
@@ -563,17 +602,55 @@ function ReportPage({
 }) {
   const metrics = useMemo(() => {
     const initiated = results.length;
-    const totalDuration = results.reduce((sum, r) => {
-      let v = Number(r.result?.duration_seconds);
-      if (Number.isNaN(v) || v < 0) {
-        v = Number(r.result?.elapsed_wait_seconds);
-      }
-      return Number.isNaN(v) || v < 0 ? sum : sum + v;
-    }, 0);
+    const totalDuration = results.reduce((sum, r) => sum + getAgentDuration(r), 0);
     const averageDuration = initiated > 0 ? totalDuration / initiated : 0;
     const totalIssues = results.reduce((sum, r) => sum + (r.result?.issues_detected?.length || 0), 0);
-    return { initiated, totalDuration, averageDuration, totalIssues };
+    const durations = results.map((r) => getAgentDuration(r));
+    const maxDuration = Math.max(0, ...durations);
+    const issueCounts = results.map((r) => r.result?.issues_detected?.length || 0);
+    const maxIssues = Math.max(0, ...issueCounts);
+    return { initiated, totalDuration, averageDuration, totalIssues, maxDuration, maxIssues };
   }, [results]);
+
+  const severityCounts = useMemo(() => {
+    const counts = { high: 0, medium: 0, low: 0, unknown: 0 };
+    results.forEach((r) => {
+      (r.result?.issues_detected || []).forEach((text) => {
+        const s = parseSeverity(text);
+        counts[s] += 1;
+      });
+    });
+    return counts;
+  }, [results]);
+
+  const agentSummaries = useMemo(
+    () =>
+      results.map((r) => {
+        const issues = r.result?.issues_detected || [];
+        const severities = issues.map(parseSeverity);
+        const worstSeverity: Severity =
+          severities.includes("high") ? "high" : severities.includes("medium") ? "medium" : severities.includes("low") ? "low" : "unknown";
+        return {
+          index: r.index,
+          task: r.task,
+          duration: getAgentDuration(r),
+          issueCount: issues.length,
+          worstSeverity,
+        };
+      }),
+    [results]
+  );
+
+  const [expandedAgents, setExpandedAgents] = useState<Set<number>>(new Set());
+
+  const toggleAgent = (index: number) => {
+    setExpandedAgents((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
 
   return (
     <div className="relative min-h-screen">
@@ -611,25 +688,190 @@ function ReportPage({
           </div>
         </div>
 
-        <div className="space-y-4 mb-8">
-          {results.map((agent) => (
-            <div key={`report-${agent.index}`} className="rounded-xl border border-gray-800 bg-black/40 backdrop-blur-sm p-6">
-              <p className="font-serif text-lg font-semibold text-white mb-1">
-                Agent {agent.index} · {agent.task}
-              </p>
-              <p className="font-serif text-sm text-gray-400 mb-3">
-                {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)}
-              </p>
-              {agent.result?.result_summary ? (
-                <p className="font-serif text-base text-gray-300 mb-3 leading-relaxed">{agent.result.result_summary}</p>
-              ) : null}
-              {(agent.result?.issues_detected || []).slice(0, 3).map((issue, idx) => (
-                <p key={`issue-${agent.index}-${idx}`} className="font-serif text-sm text-[var(--calpen-red)] mb-1">
-                  {issue}
-                </p>
-              ))}
+        {metrics.totalIssues > 0 && (
+          <div className="mb-8">
+            <p className="font-serif text-sm text-gray-300 mb-2">
+              {metrics.totalIssues} issues: {severityCounts.high} high, {severityCounts.medium} medium, {severityCounts.low} low
+              {severityCounts.unknown > 0 ? `, ${severityCounts.unknown} other` : ""}
+            </p>
+            <div className="h-2 rounded-full overflow-hidden flex bg-gray-800 border border-gray-700">
+              {severityCounts.high > 0 && (
+                <div
+                  className="h-full bg-[var(--calpen-red)]"
+                  style={{ width: `${(severityCounts.high / metrics.totalIssues) * 100}%` }}
+                />
+              )}
+              {severityCounts.medium > 0 && (
+                <div
+                  className="h-full bg-[var(--calpen-amber)]"
+                  style={{ width: `${(severityCounts.medium / metrics.totalIssues) * 100}%` }}
+                />
+              )}
+              {severityCounts.low > 0 && (
+                <div
+                  className="h-full bg-gray-500"
+                  style={{ width: `${(severityCounts.low / metrics.totalIssues) * 100}%` }}
+                />
+              )}
+              {severityCounts.unknown > 0 && (
+                <div
+                  className="h-full bg-gray-600"
+                  style={{ width: `${(severityCounts.unknown / metrics.totalIssues) * 100}%` }}
+                />
+              )}
             </div>
-          ))}
+          </div>
+        )}
+
+        <div className="mb-8">
+          <h3 className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-3">By agent</h3>
+          <div className="space-y-3">
+            {agentSummaries.map((s) => (
+              <div
+                key={`branch-${s.index}`}
+                className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-800 bg-black/40 backdrop-blur-sm px-4 py-3"
+              >
+                <span className="font-serif text-sm font-medium text-white shrink-0">Agent {s.index} · {s.task}</span>
+                <div className="flex-1 min-w-[120px] h-2 rounded-full bg-gray-800 overflow-hidden border border-gray-700">
+                  {metrics.maxDuration > 0 && (
+                    <div
+                      className="h-full bg-[var(--calpen-green)]/60 rounded-full"
+                      style={{ width: `${(s.duration / metrics.maxDuration) * 100}%` }}
+                    />
+                  )}
+                </div>
+                <span className="font-serif text-xs text-gray-400 shrink-0">{formatSeconds(s.duration)}</span>
+                <span className="font-serif text-xs text-gray-400 shrink-0">{s.issueCount} issues</span>
+                <span
+                  className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                    s.worstSeverity === "high"
+                      ? "bg-[var(--calpen-red)]"
+                      : s.worstSeverity === "medium"
+                        ? "bg-[var(--calpen-amber)]"
+                        : "bg-gray-500"
+                  }`}
+                  title={s.worstSeverity}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {(metrics.maxDuration > 0 || metrics.maxIssues > 0) && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            {metrics.maxDuration > 0 && (
+              <div>
+                <h3 className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-3">Duration per agent</h3>
+                <div className="space-y-2">
+                  {agentSummaries.map((s) => (
+                    <div key={`dur-${s.index}`} className="flex items-center gap-3">
+                      <span className="font-serif text-sm text-gray-300 w-32 shrink-0 truncate" title={s.task}>{s.task}</span>
+                      <div className="flex-1 h-2 rounded-full bg-gray-800 overflow-hidden border border-gray-700">
+                        <div
+                          className="h-full bg-[var(--calpen-green)]/60 rounded-full"
+                          style={{ width: `${(s.duration / metrics.maxDuration) * 100}%` }}
+                        />
+                      </div>
+                      <span className="font-serif text-xs text-gray-400 w-12 shrink-0">{formatSeconds(s.duration)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {metrics.maxIssues > 0 && (
+              <div>
+                <h3 className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-3">Issues per agent</h3>
+                <div className="space-y-2">
+                  {agentSummaries.map((s) => (
+                    <div key={`iss-${s.index}`} className="flex items-center gap-3">
+                      <span className="font-serif text-sm text-gray-300 w-32 shrink-0 truncate" title={s.task}>{s.task}</span>
+                      <div className="flex-1 h-2 rounded-full bg-gray-800 overflow-hidden border border-gray-700">
+                        <div
+                          className="h-full bg-[var(--calpen-red)]/50 rounded-full"
+                          style={{ width: `${metrics.maxIssues > 0 ? (s.issueCount / metrics.maxIssues) * 100 : 0}%` }}
+                        />
+                      </div>
+                      <span className="font-serif text-xs text-gray-400 w-8 shrink-0">{s.issueCount}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="space-y-4 mb-8">
+          {results.map((agent) => {
+            const issues = agent.result?.issues_detected || [];
+            const sortedIssues = [...issues].sort((a, b) => {
+              const order: Record<Severity, number> = { high: 0, medium: 1, low: 2, unknown: 3 };
+              return order[parseSeverity(a)] - order[parseSeverity(b)];
+            });
+            const high = issues.filter((i) => parseSeverity(i) === "high").length;
+            const medium = issues.filter((i) => parseSeverity(i) === "medium").length;
+            const low = issues.filter((i) => parseSeverity(i) === "low").length;
+            const severityBreakdown = issues.length
+              ? `${issues.length} issues (${high} high, ${medium} medium, ${low} low)`
+              : "0 issues";
+            const isExpanded = expandedAgents.has(agent.index);
+
+            return (
+              <div
+                key={`report-${agent.index}`}
+                id={`agent-${agent.index}`}
+                className="rounded-xl border border-gray-800 bg-black/40 backdrop-blur-sm overflow-hidden"
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleAgent(agent.index)}
+                  className="w-full text-left p-6 flex flex-wrap items-center justify-between gap-2"
+                >
+                  <div>
+                    <p className="font-serif text-lg font-semibold text-white mb-1">
+                      Agent {agent.index} · {agent.task}
+                    </p>
+                    <p className="font-serif text-sm text-gray-400">
+                      {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)} · {severityBreakdown}
+                    </p>
+                  </div>
+                  <span className="font-serif text-sm text-gray-500">
+                    {isExpanded ? "Hide details" : "Show details"}
+                  </span>
+                </button>
+                {isExpanded && (
+                  <div className="px-6 pb-6 pt-0 border-t border-gray-800 max-w-prose">
+                    {agent.result?.result_summary ? (
+                      <p className="font-serif text-base text-gray-200 mb-4 leading-relaxed">
+                        {agent.result.result_summary}
+                      </p>
+                    ) : null}
+                    <div className="space-y-2">
+                      {sortedIssues.map((issue, idx) => {
+                        const sev = parseSeverity(issue);
+                        const label = sev.charAt(0).toUpperCase() + sev.slice(1);
+                        const pillClass =
+                          sev === "high"
+                            ? "bg-[var(--calpen-red)]/20 text-[var(--calpen-red)] border-[var(--calpen-red)]/40"
+                            : sev === "medium"
+                              ? "bg-[var(--calpen-amber)]/20 text-[var(--calpen-amber)] border-[var(--calpen-amber)]/40"
+                              : sev === "low"
+                                ? "bg-gray-500/20 text-gray-400 border-gray-500/40"
+                                : "bg-gray-600/20 text-gray-500 border-gray-600/40";
+                        return (
+                          <p key={`issue-${agent.index}-${idx}`} className="font-serif text-sm leading-relaxed flex items-baseline gap-2">
+                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium border ${pillClass}`}>
+                              {label}
+                            </span>
+                            <span className="text-[var(--calpen-red)]">{issue.replace(/^\[(high|medium|low)\]\s*/i, "").trim()}</span>
+                          </p>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
 
         <button
