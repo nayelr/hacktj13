@@ -57,6 +57,19 @@ function parseTasks(raw: string) {
     .filter(Boolean);
 }
 
+function isAbortError(err: unknown): boolean {
+  if (err instanceof Error && err.name === "AbortError") return true;
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /abort|signal is aborted/i.test(msg);
+}
+
+function createRunId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 async function postJson(path: string, body: unknown, signal?: AbortSignal) {
   const res = await fetch(apiUrl(path), {
     method: "POST",
@@ -267,7 +280,7 @@ function LivePage({
   const cancelledRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const skipRef = useRef(false);
-  const skipResolveRef = useRef<(() => void) | null>(null);
+  const runIdRef = useRef<string>(createRunId());
 
   useEffect(() => {
     const tick = setInterval(() => {
@@ -295,7 +308,7 @@ function LivePage({
           website_url: cfg.websiteUrl,
         }, ac.signal);
       } catch (err) {
-        if (cancelledRef.current) return;
+        if (isAbortError(err) || cancelledRef.current) return;
         setErrorText(err instanceof Error ? err.message : "Failed to save context.");
         setRunning(false);
         return;
@@ -320,6 +333,7 @@ function LivePage({
             description: cfg.description,
             website_url: cfg.websiteUrl,
             task,
+            run_id: runIdRef.current,
           }, ac.signal);
           if (cancelledRef.current) return;
           const result = data?.result || {};
@@ -335,7 +349,7 @@ function LivePage({
           );
           setAgents([...currentAgents]);
         } catch (err) {
-          if (cancelledRef.current) return;
+          if (isAbortError(err) || cancelledRef.current) return;
           if (skipRef.current) {
             skipRef.current = false;
             currentAgents = currentAgents.map((agent) =>
@@ -388,10 +402,18 @@ function LivePage({
     abortControllerRef.current?.abort();
   };
 
-  const handleCancel = () => {
+  const handleCancel = async () => {
     cancelledRef.current = true;
     abortControllerRef.current?.abort();
     setRunning(false);
+    setStatusText("Cancelling active calls...");
+    try {
+      await postJson("/api/call/batch/cancel", {
+        run_id: runIdRef.current,
+      });
+    } catch {
+      // Ignore teardown errors here; UI still exits after issuing cancel.
+    }
     setStatusText("Cancelled.");
     onCancel();
   };

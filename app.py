@@ -6,7 +6,9 @@ import json
 import os
 import random
 import re
+import threading
 import time
+from datetime import datetime
 from html import unescape
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -48,6 +50,9 @@ RANDOM_CALLER_TONES = [
     "professional, concise, and patient",
     "warm, efficient, and curious",
 ]
+
+_RUN_CONTROL_LOCK = threading.Lock()
+_RUN_CONTROL = {}
 
 
 def get_elevenlabs_client():
@@ -459,6 +464,110 @@ def elevenlabs_get(path: str, params: dict = None):
     return _elevenlabs_request(path, method="GET")
 
 
+def elevenlabs_request_delete(path: str):
+    return _elevenlabs_request(path, method="DELETE")
+
+
+def _ensure_run_state(run_id: str):
+    with _RUN_CONTROL_LOCK:
+        state = _RUN_CONTROL.get(run_id)
+        if state is None:
+            state = {"cancelled": False, "active_calls": {}}
+            _RUN_CONTROL[run_id] = state
+        return state
+
+
+def _is_run_cancelled(run_id: str):
+    if not run_id:
+        return False
+    with _RUN_CONTROL_LOCK:
+        state = _RUN_CONTROL.get(run_id) or {}
+        return bool(state.get("cancelled"))
+
+
+def _register_active_call(run_id: str, call_sid: str, conversation_id: str):
+    if not run_id:
+        return
+    state = _ensure_run_state(run_id)
+    key = f"{call_sid or ''}:{conversation_id or ''}"
+    with _RUN_CONTROL_LOCK:
+        state["active_calls"][key] = {
+            "call_sid": (call_sid or "").strip(),
+            "conversation_id": (conversation_id or "").strip(),
+        }
+
+
+def _unregister_active_call(run_id: str, call_sid: str, conversation_id: str):
+    if not run_id:
+        return
+    key = f"{call_sid or ''}:{conversation_id or ''}"
+    with _RUN_CONTROL_LOCK:
+        state = _RUN_CONTROL.get(run_id)
+        if not state:
+            return
+        state.get("active_calls", {}).pop(key, None)
+
+
+def _mark_run_cancelled(run_id: str):
+    if not run_id:
+        return []
+    state = _ensure_run_state(run_id)
+    with _RUN_CONTROL_LOCK:
+        state["cancelled"] = True
+        active_calls = list((state.get("active_calls") or {}).values())
+    return active_calls
+
+
+def terminate_outbound_call(call_sid: str = "", conversation_id: str = ""):
+    """Best-effort teardown for active calls/conversations."""
+    call_sid = (call_sid or "").strip()
+    conversation_id = (conversation_id or "").strip()
+    attempts = []
+    if call_sid:
+        attempts.extend(
+            [
+                ("POST", f"/v1/convai/twilio/calls/{call_sid}/hangup", {}),
+                ("POST", f"/v1/convai/twilio/calls/{call_sid}/cancel", {}),
+                ("POST", f"/v1/convai/twilio/calls/{call_sid}/end", {}),
+                ("PATCH", f"/v1/convai/twilio/calls/{call_sid}", {"status": "canceled"}),
+                ("PATCH", f"/v1/convai/twilio/calls/{call_sid}", {"status": "cancelled"}),
+                ("PATCH", f"/v1/convai/twilio/calls/{call_sid}", {"status": "ended"}),
+                ("DELETE", f"/v1/convai/twilio/calls/{call_sid}", None),
+            ]
+        )
+    if conversation_id:
+        attempts.extend(
+            [
+                ("POST", f"/v1/convai/conversations/{conversation_id}/end", {}),
+                ("POST", f"/v1/convai/conversations/{conversation_id}/cancel", {}),
+                ("PATCH", f"/v1/convai/conversations/{conversation_id}", {"status": "ended"}),
+                ("PATCH", f"/v1/convai/conversations/{conversation_id}", {"status": "cancelled"}),
+                ("DELETE", f"/v1/convai/conversations/{conversation_id}", None),
+            ]
+        )
+
+    errors = []
+    successes = []
+    for method, path, payload in attempts:
+        try:
+            if method == "POST":
+                elevenlabs_post(path, payload or {})
+            elif method == "PATCH":
+                elevenlabs_request_patch(path, payload or {})
+            elif method == "DELETE":
+                elevenlabs_request_delete(path)
+            else:
+                continue
+            successes.append(f"{method} {path}")
+            # One success on call-level endpoints is enough to stop trying more call endpoints.
+            if call_sid and f"/twilio/calls/{call_sid}" in path:
+                break
+        except Exception as exc:
+            errors.append(f"{method} {path}: {exc}")
+
+    return {"ok": bool(successes), "attempted": len(attempts), "successes": successes, "errors": errors}
+
+
 def sync_agent_configuration(agent_id: str, business_description: str, scenario: str):
     current_agent = elevenlabs_get(f"/v1/convai/agents/{agent_id}")
     conversation_config = json.loads(json.dumps(current_agent.get("conversation_config") or {}))
@@ -558,35 +667,130 @@ def fetch_call_lifecycle_status(call_sid=None, conversation_id=None):
 
 
 def extract_duration_seconds(payload: dict):
-    candidates = [
-        payload.get("duration_seconds"),
-        payload.get("duration_sec"),
-        payload.get("duration"),
-        get_nested_value(payload, ["call", "duration_seconds"]),
-        get_nested_value(payload, ["call", "duration_sec"]),
-        get_nested_value(payload, ["call", "duration"]),
-        get_nested_value(payload, ["conversation", "duration_seconds"]),
-        get_nested_value(payload, ["conversation", "duration_sec"]),
-        get_nested_value(payload, ["conversation", "duration"]),
-        get_nested_value(payload, ["metadata", "duration_seconds"]),
-    ]
-    for value in candidates:
+    def parse_duration_value(value, assume_ms=False):
         if value in (None, ""):
-            continue
-        try:
+            return None
+        if isinstance(value, (int, float)):
             parsed = float(value)
-        except (TypeError, ValueError):
-            continue
-        if parsed >= 0:
-            return round(parsed, 2)
+            if parsed < 0:
+                return None
+            return round(parsed / 1000.0, 2) if assume_ms else round(parsed, 2)
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        if ":" in text:
+            parts = text.split(":")
+            if len(parts) in {2, 3}:
+                try:
+                    nums = [float(p) for p in parts]
+                except ValueError:
+                    nums = []
+                if nums:
+                    if len(nums) == 2:
+                        return round(nums[0] * 60 + nums[1], 2)
+                    return round(nums[0] * 3600 + nums[1] * 60 + nums[2], 2)
+        ms_suffix = text.endswith("ms")
+        if ms_suffix:
+            text = text[:-2].strip()
+        try:
+            parsed = float(text)
+        except ValueError:
+            return None
+        if parsed < 0:
+            return None
+        if assume_ms or ms_suffix:
+            parsed = parsed / 1000.0
+        return round(parsed, 2)
+
+    def parse_timestamp_seconds(value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)):
+            parsed = float(value)
+            if parsed <= 0:
+                return None
+            # Heuristic: Unix ms timestamps are much larger.
+            if parsed > 1e11:
+                parsed = parsed / 1000.0
+            return parsed
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = float(text)
+            if parsed > 1e11:
+                parsed = parsed / 1000.0
+            return parsed if parsed > 0 else None
+        except ValueError:
+            pass
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return None
+
+    candidates = [
+        (payload.get("duration_seconds"), False),
+        (payload.get("duration_sec"), False),
+        (payload.get("duration"), False),
+        (payload.get("duration_ms"), True),
+        (payload.get("call_duration"), False),
+        (payload.get("call_duration_seconds"), False),
+        (get_nested_value(payload, ["call", "duration_seconds"]), False),
+        (get_nested_value(payload, ["call", "duration_sec"]), False),
+        (get_nested_value(payload, ["call", "duration"]), False),
+        (get_nested_value(payload, ["call", "duration_ms"]), True),
+        (get_nested_value(payload, ["conversation", "duration_seconds"]), False),
+        (get_nested_value(payload, ["conversation", "duration_sec"]), False),
+        (get_nested_value(payload, ["conversation", "duration"]), False),
+        (get_nested_value(payload, ["conversation", "duration_ms"]), True),
+        (get_nested_value(payload, ["metadata", "duration_seconds"]), False),
+        (get_nested_value(payload, ["metadata", "duration_ms"]), True),
+    ]
+    for value, assume_ms in candidates:
+        parsed = parse_duration_value(value, assume_ms=assume_ms)
+        if parsed is not None:
+            return parsed
+
+    start = (
+        payload.get("started_at")
+        or payload.get("start_time")
+        or get_nested_value(payload, ["call", "started_at"])
+        or get_nested_value(payload, ["call", "start_time"])
+        or get_nested_value(payload, ["conversation", "started_at"])
+        or get_nested_value(payload, ["conversation", "start_time"])
+    )
+    end = (
+        payload.get("ended_at")
+        or payload.get("end_time")
+        or get_nested_value(payload, ["call", "ended_at"])
+        or get_nested_value(payload, ["call", "end_time"])
+        or get_nested_value(payload, ["conversation", "ended_at"])
+        or get_nested_value(payload, ["conversation", "end_time"])
+    )
+    start_ts = parse_timestamp_seconds(start)
+    end_ts = parse_timestamp_seconds(end)
+    if start_ts is not None and end_ts is not None and end_ts >= start_ts:
+        return round(end_ts - start_ts, 2)
     return None
 
 
-def wait_for_call_completion(call_sid=None, conversation_id=None, timeout_seconds=600, poll_seconds=5):
+def wait_for_call_completion(call_sid=None, conversation_id=None, timeout_seconds=600, poll_seconds=5, run_id=None):
     deadline = time.time() + timeout_seconds
     last_status = ""
     started = time.time()
     while time.time() < deadline:
+        if run_id and _is_run_cancelled(run_id):
+            termination = terminate_outbound_call(call_sid=call_sid, conversation_id=conversation_id)
+            return {
+                "completed": True,
+                "status": "cancelled",
+                "timed_out": False,
+                "duration_seconds": None,
+                "elapsed_wait_seconds": round(time.time() - started, 2),
+                "raw": {"cancelled_by_user": True, "termination": termination},
+            }
         status, payload = fetch_call_lifecycle_status(call_sid=call_sid, conversation_id=conversation_id)
         if status:
             last_status = status
@@ -881,8 +1085,21 @@ def build_call_analysis(task: str, entry: dict, lifecycle_payload: dict, detail_
     return result
 
 
-def run_single_batch_call(business_description: str, to_number: str, task: str, voice_ids=None):
+def run_single_batch_call(business_description: str, to_number: str, task: str, voice_ids=None, run_id: str = ""):
     scenario = task.strip()
+    if run_id and _is_run_cancelled(run_id):
+        return {
+            "task": task,
+            "scenario": scenario,
+            "business_description": business_description[:3000],
+            "status": "cancelled",
+            "wait_status": "cancelled",
+            "wait_timed_out": False,
+            "duration_seconds": None,
+            "elapsed_wait_seconds": 0.0,
+            "result_summary": "Cancelled before this agent started.",
+            "issues_detected": [],
+        }
     caller_settings = randomize_caller_settings(voice_ids)
     payload = {
         "agent_id": os.getenv("ELEVENLABS_AGENT_ID"),
@@ -911,25 +1128,50 @@ def run_single_batch_call(business_description: str, to_number: str, task: str, 
     entry["status"] = call_response.get("status", "initiated")
     entry["call_sid"] = call_response.get("call_sid") or call_response.get("callSid")
     entry["conversation_id"] = call_response.get("conversation_id") or call_response.get("conversationId")
-    wait_result = wait_for_call_completion(
-        call_sid=entry.get("call_sid"),
-        conversation_id=entry.get("conversation_id"),
-    )
-    entry["wait_status"] = wait_result["status"]
-    entry["wait_timed_out"] = wait_result["timed_out"]
-    entry["duration_seconds"] = wait_result.get("duration_seconds")
-    entry["elapsed_wait_seconds"] = wait_result.get("elapsed_wait_seconds")
-    detail_payloads = fetch_conversation_detail_payloads(
-        call_sid=entry.get("call_sid"),
-        conversation_id=entry.get("conversation_id"),
-    )
-    analysis = build_call_analysis(
-        task=task,
-        entry=entry,
-        lifecycle_payload=wait_result.get("raw") or {},
-        detail_payloads=detail_payloads,
-    )
-    entry.update(analysis)
+    _register_active_call(run_id, entry.get("call_sid"), entry.get("conversation_id"))
+    try:
+        wait_result = wait_for_call_completion(
+            call_sid=entry.get("call_sid"),
+            conversation_id=entry.get("conversation_id"),
+            run_id=run_id,
+        )
+        entry["wait_status"] = wait_result["status"]
+        entry["wait_timed_out"] = wait_result["timed_out"]
+        entry["duration_seconds"] = wait_result.get("duration_seconds")
+        entry["elapsed_wait_seconds"] = wait_result.get("elapsed_wait_seconds")
+        if wait_result["status"] == "cancelled":
+            entry["status"] = "cancelled"
+            entry["result_summary"] = "Cancelled by user while call was in progress."
+            entry["issues_detected"] = []
+            return entry
+        detail_payloads = fetch_conversation_detail_payloads(
+            call_sid=entry.get("call_sid"),
+            conversation_id=entry.get("conversation_id"),
+        )
+        if entry.get("duration_seconds") is None:
+            for payload in detail_payloads:
+                parsed_duration = extract_duration_seconds(payload or {})
+                if parsed_duration is not None:
+                    entry["duration_seconds"] = parsed_duration
+                    break
+        if entry.get("duration_seconds") is None:
+            elapsed_wait = entry.get("elapsed_wait_seconds")
+            if elapsed_wait is not None:
+                try:
+                    elapsed_val = float(elapsed_wait)
+                    if elapsed_val >= 0:
+                        entry["duration_seconds"] = round(elapsed_val, 2)
+                except (TypeError, ValueError):
+                    pass
+        analysis = build_call_analysis(
+            task=task,
+            entry=entry,
+            lifecycle_payload=wait_result.get("raw") or {},
+            detail_payloads=detail_payloads,
+        )
+        entry.update(analysis)
+    finally:
+        _unregister_active_call(run_id, entry.get("call_sid"), entry.get("conversation_id"))
     return entry
 
 
@@ -1270,6 +1512,7 @@ def start_single_batch_call():
     task = (data.get("task") or "").strip()
     if not task:
         return jsonify({"error": "Task is required."}), 400
+    run_id = (data.get("run_id") or "").strip()
 
     request_website_url = normalize_website_url(data.get("website_url") or "")
     cached_website_url = session.get("website_url") or ""
@@ -1298,11 +1541,51 @@ def start_single_batch_call():
 
     voice_ids = get_available_voice_ids()
     try:
-        entry = run_single_batch_call(business_description, to_number, task, voice_ids=voice_ids)
+        entry = run_single_batch_call(business_description, to_number, task, voice_ids=voice_ids, run_id=run_id)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
     return jsonify({"ok": entry.get("status") != "failed", "result": entry})
+
+
+@app.route("/api/call/batch/cancel", methods=["POST"])
+def cancel_batch_calls():
+    """Cancel a live penetration-test run and terminate any active calls."""
+    data = request.get_json() or {}
+    run_id = (data.get("run_id") or "").strip()
+    if not run_id:
+        return jsonify({"error": "run_id is required."}), 400
+
+    active_calls = _mark_run_cancelled(run_id)
+    terminations = []
+    for active in active_calls:
+        call_sid = (active.get("call_sid") or "").strip()
+        conversation_id = (active.get("conversation_id") or "").strip()
+        if not call_sid and not conversation_id:
+            continue
+        terminations.append(
+            {
+                "call_sid": call_sid,
+                "conversation_id": conversation_id,
+                "termination": terminate_outbound_call(call_sid=call_sid, conversation_id=conversation_id),
+            }
+        )
+
+    terminated_ok = sum(
+        1
+        for item in terminations
+        if isinstance(item.get("termination"), dict) and item["termination"].get("ok")
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "run_id": run_id,
+            "cancelled": True,
+            "active_calls_seen": len(active_calls),
+            "calls_terminated": terminated_ok,
+            "terminations": terminations,
+        }
+    )
 
 
 if __name__ == "__main__":
