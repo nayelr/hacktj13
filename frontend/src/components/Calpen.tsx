@@ -266,6 +266,8 @@ function LivePage({
   const stoppedRef = useRef(false);
   const cancelledRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const skipRef = useRef(false);
+  const skipResolveRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const tick = setInterval(() => {
@@ -310,6 +312,7 @@ function LivePage({
         setAgents([...currentAgents]);
 
         try {
+          skipRef.current = false;
           const ac = new AbortController();
           abortControllerRef.current = ac;
           const data = await postJson("/api/call/batch/one", {
@@ -333,6 +336,21 @@ function LivePage({
           setAgents([...currentAgents]);
         } catch (err) {
           if (cancelledRef.current) return;
+          if (skipRef.current) {
+            skipRef.current = false;
+            currentAgents = currentAgents.map((agent) =>
+              agent.index === idx
+                ? {
+                    ...agent,
+                    state: "done",
+                    finishedAtMs: Date.now(),
+                    result: { status: "skipped", result_summary: "Skipped by user." },
+                  }
+                : agent
+            );
+            setAgents([...currentAgents]);
+            continue;
+          }
           const msg = err instanceof Error ? err.message : "Call failed.";
           currentAgents = currentAgents.map((agent) =>
             agent.index === idx
@@ -364,6 +382,11 @@ function LivePage({
       abortControllerRef.current?.abort();
     };
   }, [cfg.description, cfg.numAgents, cfg.phone, cfg.tasks, cfg.websiteUrl, initialAgents, onDone]);
+
+  const handleSkip = () => {
+    skipRef.current = true;
+    abortControllerRef.current?.abort();
+  };
 
   const handleCancel = () => {
     cancelledRef.current = true;
@@ -397,6 +420,14 @@ function LivePage({
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {running && (
+            <button
+              onClick={handleSkip}
+              className="border border-[var(--calpen-amber)]/50 text-[var(--calpen-amber)] rounded-full px-4 py-2 text-sm font-medium hover:bg-[var(--calpen-amber)]/10 transition-colors"
+            >
+              Skip agent →
+            </button>
+          )}
           {running && (
             <button
               onClick={handleCancel}
@@ -528,8 +559,8 @@ function ReportPage({
       <div className="absolute inset-0 bg-gradient-to-b from-[#13110e]/60 via-[#13110e]/40 to-[#13110e]" />
       <div className="py-9 px-6 md:px-11 max-w-5xl mx-auto relative z-10 text-white">
         <div className="pb-7 mb-8 border-b border-gray-700">
-          <h2 className="font-serif text-2xl md:text-3xl font-bold text-white tracking-tight">Audit report</h2>
-          <p className="text-gray-400 text-sm mt-2 font-serif">
+          <h2 className="font-serif text-3xl md:text-4xl font-bold text-white tracking-tight">Audit report</h2>
+          <p className="text-gray-400 text-base mt-2 font-serif">
             {cfg.phone} · {cfg.description}
             <br />
             {new Date().toLocaleString()} · {cfg.numAgents} agents
@@ -537,38 +568,38 @@ function ReportPage({
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div className="border-l border-gray-700 pl-6 py-2">
-            <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-2">Initiated</p>
-            <p className="font-serif text-2xl md:text-3xl font-light text-white">{metrics.initiated}</p>
+          <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 pl-6 py-4 pr-4">
+            <p className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-2">Initiated</p>
+            <p className="font-serif text-3xl md:text-4xl font-light text-white">{metrics.initiated}</p>
           </div>
-          <div className="border-l border-gray-700 pl-6 py-2">
-            <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-2">Total call duration</p>
-            <p className="font-serif text-2xl md:text-3xl font-light text-[var(--calpen-green)]">{formatSeconds(metrics.totalDuration)}</p>
+          <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 pl-6 py-4 pr-4">
+            <p className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-2">Total call duration</p>
+            <p className="font-serif text-3xl md:text-4xl font-light text-[var(--calpen-green)]">{formatSeconds(metrics.totalDuration)}</p>
           </div>
-          <div className="border-l border-gray-700 pl-6 py-2">
-            <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-2">Average call duration</p>
-            <p className="font-serif text-2xl md:text-3xl font-light text-white">{formatSeconds(metrics.averageDuration)}</p>
+          <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 pl-6 py-4 pr-4">
+            <p className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-2">Average call duration</p>
+            <p className="font-serif text-3xl md:text-4xl font-light text-white">{formatSeconds(metrics.averageDuration)}</p>
           </div>
-          <div className="border-l border-gray-700 pl-6 py-2">
-            <p className="font-serif text-xs uppercase tracking-wider text-gray-500 mb-2">Issues detected</p>
-            <p className="font-serif text-2xl md:text-3xl font-light text-white">{metrics.totalIssues}</p>
+          <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 pl-6 py-4 pr-4">
+            <p className="font-serif text-sm uppercase tracking-wider text-gray-500 mb-2">Issues detected</p>
+            <p className="font-serif text-3xl md:text-4xl font-light text-white">{metrics.totalIssues}</p>
           </div>
         </div>
 
         <div className="space-y-4 mb-8">
           {results.map((agent) => (
-            <div key={`report-${agent.index}`} className="feature-card rounded-xl border border-gray-800 bg-white/[0.02] p-5">
-              <p className="font-serif text-sm font-semibold text-white mb-1">
+            <div key={`report-${agent.index}`} className="rounded-xl border border-gray-800 bg-black/40 backdrop-blur-sm p-6">
+              <p className="font-serif text-lg font-semibold text-white mb-1">
                 Agent {agent.index} · {agent.task}
               </p>
-              <p className="font-serif text-xs text-gray-400 mb-2">
+              <p className="font-serif text-sm text-gray-400 mb-3">
                 {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds)}
               </p>
               {agent.result?.result_summary ? (
-                <p className="font-serif text-sm text-gray-300 mb-2 leading-relaxed">{agent.result.result_summary}</p>
+                <p className="font-serif text-base text-gray-300 mb-3 leading-relaxed">{agent.result.result_summary}</p>
               ) : null}
               {(agent.result?.issues_detected || []).slice(0, 3).map((issue, idx) => (
-                <p key={`issue-${agent.index}-${idx}`} className="font-serif text-xs text-[var(--calpen-red)]">
+                <p key={`issue-${agent.index}-${idx}`} className="font-serif text-sm text-[var(--calpen-red)] mb-1">
                   {issue}
                 </p>
               ))}
@@ -578,7 +609,7 @@ function ReportPage({
 
         <button
           onClick={onReset}
-          className="font-serif border border-gray-700 text-white rounded-full px-6 py-3 text-sm font-medium hover:bg-white/5 transition-colors"
+          className="font-serif border border-gray-700 text-white rounded-full px-6 py-3 text-base font-medium hover:bg-white/5 transition-colors"
         >
           ← Run another test
         </button>
