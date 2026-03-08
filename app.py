@@ -962,6 +962,10 @@ def add_dev_cors_headers(response):
     allowed_origins = {
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
     }
     if origin in allowed_origins:
         response.headers["Access-Control-Allow-Origin"] = origin
@@ -1265,12 +1269,22 @@ def start_single_batch_call():
     if not task:
         return jsonify({"error": "Task is required."}), 400
 
-    try:
-        business_description, website_url = resolve_business_description(data)
-        if website_url:
-            session["website_url"] = website_url
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    request_website_url = normalize_website_url(data.get("website_url") or "")
+    cached_website_url = session.get("website_url") or ""
+    cached_description = session.get("business_description") or ""
+
+    if request_website_url and request_website_url == cached_website_url and cached_description:
+        # Reuse the already-fetched business description from /api/context — skip re-fetching the website.
+        business_description = cached_description
+        website_url = request_website_url
+    else:
+        try:
+            business_description, website_url = resolve_business_description(data)
+            if website_url:
+                session["website_url"] = website_url
+                session["business_description"] = business_description
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
     missing_env = [
         name
@@ -1290,4 +1304,4 @@ def start_single_batch_call():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=3001, use_reloader=False)

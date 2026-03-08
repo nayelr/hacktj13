@@ -37,7 +37,7 @@ type AgentCardState = {
   };
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5000";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:3001";
 const MIN_AGENTS = 2;
 const MAX_AGENTS = 10;
 
@@ -57,12 +57,13 @@ function parseTasks(raw: string) {
     .filter(Boolean);
 }
 
-async function postJson(path: string, body: unknown) {
+async function postJson(path: string, body: unknown, signal?: AbortSignal) {
   const res = await fetch(apiUrl(path), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(body),
+    signal,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -241,9 +242,11 @@ function InputPage({
 function LivePage({
   cfg,
   onDone,
+  onCancel,
 }: {
   cfg: RunConfig;
   onDone: (results: AgentCardState[]) => void;
+  onCancel: () => void;
 }) {
   const initialAgents = useMemo<AgentCardState[]>(
     () =>
@@ -261,6 +264,8 @@ function LivePage({
   const [running, setRunning] = useState(true);
   const startedAtRef = useRef<number>(Date.now());
   const stoppedRef = useRef(false);
+  const cancelledRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const tick = setInterval(() => {
@@ -276,25 +281,26 @@ function LivePage({
   }, [initialAgents]);
 
   useEffect(() => {
-    let cancelled = false;
+    cancelledRef.current = false;
     let currentAgents = initialAgents.map((agent) => ({ ...agent }));
 
     async function run() {
       try {
+        const ac = new AbortController();
+        abortControllerRef.current = ac;
         await postJson("/api/context", {
           description: cfg.description,
           website_url: cfg.websiteUrl,
-        });
+        }, ac.signal);
       } catch (err) {
-        if (!cancelled) {
-          setErrorText(err instanceof Error ? err.message : "Failed to save context.");
-          setRunning(false);
-        }
+        if (cancelledRef.current) return;
+        setErrorText(err instanceof Error ? err.message : "Failed to save context.");
+        setRunning(false);
         return;
       }
 
       for (let i = 0; i < cfg.numAgents; i += 1) {
-        if (cancelled) return;
+        if (cancelledRef.current) return;
         const idx = i + 1;
         const task = cfg.tasks[i % cfg.tasks.length];
         setStatusText(`Running agent ${idx} of ${cfg.numAgents}...`);
@@ -304,12 +310,15 @@ function LivePage({
         setAgents([...currentAgents]);
 
         try {
+          const ac = new AbortController();
+          abortControllerRef.current = ac;
           const data = await postJson("/api/call/batch/one", {
             to_number: cfg.phone,
             description: cfg.description,
             website_url: cfg.websiteUrl,
             task,
-          });
+          }, ac.signal);
+          if (cancelledRef.current) return;
           const result = data?.result || {};
           currentAgents = currentAgents.map((agent) =>
             agent.index === idx
@@ -323,6 +332,7 @@ function LivePage({
           );
           setAgents([...currentAgents]);
         } catch (err) {
+          if (cancelledRef.current) return;
           const msg = err instanceof Error ? err.message : "Call failed.";
           currentAgents = currentAgents.map((agent) =>
             agent.index === idx
@@ -338,7 +348,7 @@ function LivePage({
         }
       }
 
-      if (!cancelled) {
+      if (!cancelledRef.current) {
         setRunning(false);
         setStatusText("Run complete.");
         if (!stoppedRef.current) {
@@ -350,9 +360,18 @@ function LivePage({
 
     run();
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
+      abortControllerRef.current?.abort();
     };
   }, [cfg.description, cfg.numAgents, cfg.phone, cfg.tasks, cfg.websiteUrl, initialAgents, onDone]);
+
+  const handleCancel = () => {
+    cancelledRef.current = true;
+    abortControllerRef.current?.abort();
+    setRunning(false);
+    setStatusText("Cancelled.");
+    onCancel();
+  };
 
   const doneCount = useMemo(
     () => agents.filter((a) => a.state === "done" || a.state === "failed").length,
@@ -377,15 +396,25 @@ function LivePage({
             {cfg.phone} · {cfg.description}
           </p>
         </div>
-        <div
-          className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium border ${
-            running
-              ? "bg-[var(--calpen-green)]/10 border-[var(--calpen-green)]/40 text-[var(--calpen-green)]"
-              : "bg-white/5 border-[var(--calpen-border)] text-[var(--calpen-muted)]"
-          }`}
-        >
-          {running && <div className="w-2 h-2 rounded-full bg-[var(--calpen-green)] animate-pulse" />}
-          {running ? `LIVE · ${String(Math.floor(elapsedSec / 60)).padStart(2, "0")}:${String(elapsedSec % 60).padStart(2, "0")}` : "COMPLETE"}
+        <div className="flex items-center gap-3">
+          {running && (
+            <button
+              onClick={handleCancel}
+              className="border border-[var(--calpen-red)]/50 text-[var(--calpen-red)] rounded-full px-4 py-2 text-sm font-medium hover:bg-[var(--calpen-red)]/10 transition-colors"
+            >
+              Cancel test
+            </button>
+          )}
+          <div
+            className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium border ${
+              running
+                ? "bg-[var(--calpen-green)]/10 border-[var(--calpen-green)]/40 text-[var(--calpen-green)]"
+                : "bg-white/5 border-[var(--calpen-border)] text-[var(--calpen-muted)]"
+            }`}
+          >
+            {running && <div className="w-2 h-2 rounded-full bg-[var(--calpen-green)] animate-pulse" />}
+            {running ? `LIVE · ${String(Math.floor(elapsedSec / 60)).padStart(2, "0")}:${String(elapsedSec % 60).padStart(2, "0")}` : "COMPLETE"}
+          </div>
         </div>
       </div>
 
@@ -582,6 +611,11 @@ export default function Calpen() {
             onDone={(nextResults) => {
               setResults(nextResults);
               setPage("report");
+            }}
+            onCancel={() => {
+              setCfg(null);
+              setResults([]);
+              setPage("input");
             }}
           />
         </div>
