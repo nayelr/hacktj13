@@ -40,6 +40,35 @@ type AgentCardState = {
   };
 };
 
+type VoiceOption = {
+  voice_id: string;
+  name: string;
+  category?: string;
+};
+
+type DemoTranscriptItem = {
+  index: number;
+  role: string;
+  label: string;
+  text: string;
+  time_in_call_secs?: number | null;
+};
+
+type DemoRunResult = {
+  agent_id?: string;
+  scenario?: string;
+  turn_count?: number;
+  transcript: DemoTranscriptItem[];
+  analysis?: {
+    evaluation_criteria_results?: Array<{
+      criteria?: string;
+      result?: string;
+      rationale?: string;
+    }>;
+    summary?: string;
+  };
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:3001";
 const MIN_AGENTS = 2;
 const MAX_AGENTS = 10;
@@ -138,6 +167,32 @@ async function postJson(path: string, body: unknown, signal?: AbortSignal) {
     throw new Error(data?.error || res.statusText || "Request failed.");
   }
   return data;
+}
+
+async function getJson(path: string, signal?: AbortSignal) {
+  const res = await fetch(apiUrl(path), {
+    credentials: "include",
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error || res.statusText || "Request failed.");
+  }
+  return data;
+}
+
+async function fetchAudioBlob(text: string, voiceId?: string, signal?: AbortSignal) {
+  const res = await fetch(apiUrl("/tts"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ text, voice_id: voiceId || "" }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error("Failed to synthesize demo audio.");
+  }
+  return res.blob();
 }
 
 function InputPage({
@@ -601,6 +656,357 @@ function LivePage({
   );
 }
 
+function DemoPage() {
+  const [description, setDescription] = useState("");
+  const [websiteUrl, setWebsiteUrl] = useState("");
+  const [scenario, setScenario] = useState("check availability, complete a typical customer task, and avoid speaking to a human if possible");
+  const [servicePrompt, setServicePrompt] = useState(
+    "You are the business-side customer service voice agent. Answer like a front desk, receptionist, or IVR for the business. Ask clarifying questions, enforce expected formats, and try to resolve the caller's request."
+  );
+  const [serviceFirstMessage, setServiceFirstMessage] = useState("Thank you for calling. How can I help you today?");
+  const [maxTurns, setMaxTurns] = useState(18);
+  const [voices, setVoices] = useState<VoiceOption[]>([]);
+  const [penetrationVoiceId, setPenetrationVoiceId] = useState("");
+  const [serviceVoiceId, setServiceVoiceId] = useState("");
+  const [loadingVoices, setLoadingVoices] = useState(true);
+  const [runningDemo, setRunningDemo] = useState(false);
+  const [playbackActive, setPlaybackActive] = useState(false);
+  const [activeTranscriptIndex, setActiveTranscriptIndex] = useState<number | null>(null);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [demoResult, setDemoResult] = useState<DemoRunResult | null>(null);
+  const playbackTokenRef = useRef(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    setLoadingVoices(true);
+    getJson("/api/voices", ac.signal)
+      .then((data) => {
+        const nextVoices = (data?.voices || []) as VoiceOption[];
+        const defaultVoiceId = String(data?.defaults?.voice_id || "");
+        setVoices(nextVoices);
+        if (defaultVoiceId) {
+          setPenetrationVoiceId(defaultVoiceId);
+        }
+        if (nextVoices.length) {
+          const fallbackServiceVoice = nextVoices.find((voice) => voice.voice_id !== defaultVoiceId)?.voice_id || nextVoices[0].voice_id;
+          setServiceVoiceId(fallbackServiceVoice);
+        }
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to load voices.");
+      })
+      .finally(() => {
+        setLoadingVoices(false);
+      });
+    return () => ac.abort();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      playbackTokenRef.current += 1;
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  const stopPlayback = () => {
+    playbackTokenRef.current += 1;
+    setPlaybackActive(false);
+    setActiveTranscriptIndex(null);
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+  };
+
+  const playTranscript = async () => {
+    if (!demoResult?.transcript?.length) return;
+    stopPlayback();
+    const token = playbackTokenRef.current + 1;
+    playbackTokenRef.current = token;
+    setPlaybackActive(true);
+    setError("");
+
+    try {
+      for (const item of demoResult.transcript) {
+        if (playbackTokenRef.current !== token) return;
+        setActiveTranscriptIndex(item.index);
+        const voiceId = item.role === "agent" ? penetrationVoiceId : serviceVoiceId;
+        const blob = await fetchAudioBlob(item.text, voiceId || undefined);
+        if (playbackTokenRef.current !== token) return;
+        const objectUrl = URL.createObjectURL(blob);
+        await new Promise<void>((resolve) => {
+          const audio = new Audio(objectUrl);
+          audioRef.current = audio;
+          audio.onended = () => {
+            URL.revokeObjectURL(objectUrl);
+            resolve();
+          };
+          audio.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            resolve();
+          };
+          audio.play().catch(() => {
+            URL.revokeObjectURL(objectUrl);
+            resolve();
+          });
+        });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to play demo audio.");
+    } finally {
+      if (playbackTokenRef.current === token) {
+        setPlaybackActive(false);
+        setActiveTranscriptIndex(null);
+      }
+    }
+  };
+
+  const runDemo = async () => {
+    setError("");
+    setStatus("");
+    stopPlayback();
+    if (!description.trim()) {
+      setError("Business summary is required.");
+      return;
+    }
+    setRunningDemo(true);
+    setDemoResult(null);
+    try {
+      const data = await postJson("/api/demo/simulate", {
+        description: description.trim(),
+        website_url: websiteUrl.trim(),
+        scenario: scenario.trim(),
+        service_prompt: servicePrompt.trim(),
+        service_first_message: serviceFirstMessage.trim(),
+        max_turns: maxTurns,
+      });
+      const nextResult = {
+        transcript: (data?.transcript || []) as DemoTranscriptItem[],
+        analysis: data?.analysis || {},
+        agent_id: data?.agent_id,
+        scenario: data?.scenario,
+        turn_count: data?.turn_count,
+      } satisfies DemoRunResult;
+      setDemoResult(nextResult);
+      setStatus(`Demo ready with ${nextResult.turn_count || nextResult.transcript.length} turns.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to run demo.");
+    } finally {
+      setRunningDemo(false);
+    }
+  };
+
+  const criteriaResults = demoResult?.analysis?.evaluation_criteria_results || [];
+
+  return (
+    <section className="relative min-h-screen flex flex-col pt-28 pb-16 px-4">
+      <div
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: "url('https://images.unsplash.com/photo-1493246507139-91e8fad9978e?w=1920&q=80')" }}
+      />
+      <div className="absolute inset-0 bg-gradient-to-b from-[#13110e]/70 via-[#13110e]/55 to-[#13110e]" />
+      <div className="relative z-10 w-full max-w-6xl mx-auto text-white">
+        <div className="mb-8">
+          <div className="inline-flex items-center gap-2 glass-nav rounded-full px-4 py-2 text-sm text-gray-300 mb-5">
+            <span className="w-2 h-2 bg-[var(--calpen-blue)] rounded-full pulse-indicator" />
+            <span className="tracking-wider uppercase text-xs">Demo</span>
+          </div>
+          <h1 className="font-serif text-4xl md:text-5xl text-white max-w-3xl leading-tight">Agent-vs-agent playback demo</h1>
+          <p className="text-gray-400 text-base md:text-lg mt-4 max-w-3xl">
+            This always uses the restaurant demo agent from `DEMO_AGENT_ID` against your penetration-testing agent, with website playback for both sides.
+          </p>
+        </div>
+
+        <div className="grid lg:grid-cols-[1.05fr_0.95fr] gap-6">
+          <div className="glass-nav rounded-2xl p-6 md:p-8 text-left border border-white/10">
+            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Business summary</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              placeholder="Describe the business and what the business-side agent should represent."
+              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none resize-y mb-4"
+            />
+
+            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Business website (optional)</label>
+            <input
+              type="url"
+              value={websiteUrl}
+              onChange={(e) => setWebsiteUrl(e.target.value)}
+              placeholder="https://example.com"
+              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none mb-4"
+            />
+
+            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Penetration agent goal</label>
+            <textarea
+              value={scenario}
+              onChange={(e) => setScenario(e.target.value)}
+              rows={3}
+              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none resize-y mb-4"
+            />
+
+            <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Customer service agent prompt</label>
+            <textarea
+              value={servicePrompt}
+              onChange={(e) => setServicePrompt(e.target.value)}
+              rows={6}
+              className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none resize-y mb-4"
+            />
+
+            <div className="grid md:grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Service agent opener</label>
+                <input
+                  type="text"
+                  value={serviceFirstMessage}
+                  onChange={(e) => setServiceFirstMessage(e.target.value)}
+                  className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Max turns</label>
+                <input
+                  type="number"
+                  min={4}
+                  max={40}
+                  value={maxTurns}
+                  onChange={(e) => setMaxTurns(Number(e.target.value || 18))}
+                  className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-4 mb-6">
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Penetration agent playback voice</label>
+                <select
+                  value={penetrationVoiceId}
+                  onChange={(e) => setPenetrationVoiceId(e.target.value)}
+                  disabled={loadingVoices}
+                  className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white focus:border-gray-500 focus:outline-none"
+                >
+                  <option value="">Default ElevenLabs voice</option>
+                  {voices.map((voice) => (
+                    <option key={`pen-${voice.voice_id}`} value={voice.voice_id}>
+                      {voice.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Service agent playback voice</label>
+                <select
+                  value={serviceVoiceId}
+                  onChange={(e) => setServiceVoiceId(e.target.value)}
+                  disabled={loadingVoices}
+                  className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white focus:border-gray-500 focus:outline-none"
+                >
+                  <option value="">Default ElevenLabs voice</option>
+                  {voices.map((voice) => (
+                    <option key={`svc-${voice.voice_id}`} value={voice.voice_id}>
+                      {voice.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={runDemo}
+                disabled={runningDemo}
+                className="bg-white text-black font-medium px-6 py-3 rounded-full hover:bg-gray-100 transition-colors disabled:opacity-60"
+              >
+                {runningDemo ? "Running demo..." : "Run demo"}
+              </button>
+              <button
+                type="button"
+                onClick={playTranscript}
+                disabled={!demoResult?.transcript?.length || playbackActive}
+                className="border border-gray-600 text-white rounded-full px-5 py-3 text-sm font-medium hover:bg-white/5 transition-colors disabled:opacity-60"
+              >
+                {playbackActive ? "Playing..." : "Play demo audio"}
+              </button>
+              <button
+                type="button"
+                onClick={stopPlayback}
+                disabled={!playbackActive}
+                className="border border-[var(--calpen-red)]/50 text-[var(--calpen-red)] rounded-full px-5 py-3 text-sm font-medium hover:bg-[var(--calpen-red)]/10 transition-colors disabled:opacity-60"
+              >
+                Stop audio
+              </button>
+            </div>
+
+            {status ? <p className="text-green-400 text-sm mt-4">{status}</p> : null}
+            {error ? <p className="text-red-400 text-sm mt-4">{error}</p> : null}
+          </div>
+
+          <div className="glass-nav rounded-2xl p-6 md:p-8 border border-white/10">
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <div>
+                <p className="text-xs uppercase tracking-wider text-gray-500 mb-1">Transcript</p>
+                <h2 className="font-serif text-2xl text-white">Demo conversation</h2>
+              </div>
+              {demoResult?.turn_count ? <span className="text-sm text-gray-400">{demoResult.turn_count} turns</span> : null}
+            </div>
+
+            <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
+              {demoResult?.transcript?.length ? (
+                demoResult.transcript.map((item) => (
+                  <div
+                    key={`demo-turn-${item.index}`}
+                    className={`rounded-xl border p-4 transition-colors ${
+                      activeTranscriptIndex === item.index
+                        ? "border-[var(--calpen-blue)] bg-[var(--calpen-blue)]/10"
+                        : item.role === "agent"
+                          ? "border-[var(--calpen-border)] bg-black/35"
+                          : "border-gray-700 bg-black/20"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-2 text-xs uppercase tracking-wider text-gray-500">
+                      <span>{item.label}</span>
+                      {item.time_in_call_secs !== null && item.time_in_call_secs !== undefined ? (
+                        <span>{formatSeconds(item.time_in_call_secs)}</span>
+                      ) : null}
+                    </div>
+                    <p className="text-sm md:text-base text-white leading-relaxed">{item.text}</p>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-xl border border-dashed border-gray-700 p-6 text-sm text-gray-400">
+                  Run a demo to generate a transcript and audio playback.
+                </div>
+              )}
+            </div>
+
+            {criteriaResults.length ? (
+              <div className="mt-6 pt-5 border-t border-gray-800">
+                <p className="text-xs uppercase tracking-wider text-gray-500 mb-3">Simulation analysis</p>
+                <div className="space-y-2">
+                  {criteriaResults.map((result, idx) => (
+                    <div key={`crit-${idx}`} className="rounded-lg border border-gray-800 bg-black/30 px-4 py-3">
+                      <p className="text-sm text-white">{result.criteria || "Criterion"}</p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {result.result || "No result"}{result.rationale ? ` · ${result.rationale}` : ""}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ReportPage({
   cfg,
   results,
@@ -897,6 +1303,7 @@ function ReportPage({
 }
 
 export default function Calpen() {
+  const [view, setView] = useState<"test" | "demo">("test");
   const [page, setPage] = useState<"input" | "live" | "report">("input");
   const [cfg, setCfg] = useState<RunConfig | null>(null);
   const [results, setResults] = useState<AgentCardState[]>([]);
@@ -949,7 +1356,33 @@ export default function Calpen() {
   return (
     <div className="min-h-screen bg-[#13110e] text-white">
       <Navbar />
-      {page === "input" && (
+      <div className="pt-24 px-4 relative z-10">
+        <div className="max-w-6xl mx-auto">
+          <div className="inline-flex items-center gap-2 rounded-full border border-gray-800 bg-black/35 backdrop-blur-sm p-1">
+            <button
+              type="button"
+              onClick={() => setView("test")}
+              className={`rounded-full px-4 py-2 text-sm transition-colors ${
+                view === "test" ? "bg-white text-black" : "text-gray-400 hover:text-white"
+              }`}
+            >
+              Launch Test
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("demo")}
+              disabled={page === "live"}
+              className={`rounded-full px-4 py-2 text-sm transition-colors ${
+                view === "demo" ? "bg-white text-black" : "text-gray-400 hover:text-white"
+              } disabled:opacity-40 disabled:cursor-not-allowed`}
+            >
+              Demo
+            </button>
+          </div>
+        </div>
+      </div>
+      {view === "demo" ? <DemoPage /> : null}
+      {view === "test" && page === "input" && (
         <InputPage
           onStart={(nextCfg) => {
             setCfg(nextCfg);
@@ -958,7 +1391,7 @@ export default function Calpen() {
           }}
         />
       )}
-      {page === "live" && cfg ? (
+      {view === "test" && page === "live" && cfg ? (
         <div className="pt-24 pb-12">
           <LivePage
             cfg={cfg}
@@ -975,7 +1408,7 @@ export default function Calpen() {
           />
         </div>
       ) : null}
-      {page === "report" && cfg ? (
+      {view === "test" && page === "report" && cfg ? (
         <div className="pt-24 pb-16">
           <ReportPage
             cfg={cfg}
