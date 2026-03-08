@@ -33,7 +33,7 @@ DEFAULT_OPENAI_ANALYSIS_MODEL = os.getenv("OPENAI_ANALYSIS_MODEL", "gpt-5-nano")
 DEFAULT_OPENAI_TRANSCRIPT_CHAR_LIMIT = 24000
 DEFAULT_CALLER_TONE = "friendly, calm, and persistent"
 # Hard-coded caller goal: voice agent always attempts this regardless of task input.
-CALLER_GOAL_HARDCODED = "attempt to book an appointment on February 30th"
+CALLER_GOAL_HARDCODED = "book an eye appointment on February 30th"
 US_E164_PATTERN = re.compile(r"^\+1\d{10}$")
 DEFAULT_BATCH_AGENT_COUNT = 3
 MIN_BATCH_AGENT_COUNT = 1
@@ -237,51 +237,44 @@ def build_caller_prompt(business_description: str, scenario: str, caller_setting
     caller_name = caller_settings.get("caller_name") or "Not specified"
     caller_tone = caller_settings.get("caller_tone") or DEFAULT_CALLER_TONE
     return (
-        "You are a penetration-testing caller evaluating a business phone system (IVR, operator, or voice bot). "
-        "Your goal is to uncover reliability, validation, and logic flaws by pressing hard on edge cases—say unexpected things and use unusual but plausible patterns to stress-test the system.\n\n"
-        "CORE RULE — NO REPETITION:\n"
-        "Never test the same edge case twice in a single call. "
-        "If you already tried an invalid date, move on to a completely different category of edge case. "
-        "Each probe must test something new. Track what you have already tried and do not repeat it.\n\n"
-        "PRESS HARD — UNEXPECTED INPUTS AND UNUSUAL PATTERNS:\n"
-        "Use phrasing and answers that real users might say but systems often fail on: "
-        "non-standard formats (e.g. 'the 15th of March' instead of 'March 15'), creative or ambiguous wording, "
-        "mid-sentence corrections, trailing filler ('um, I think 555-1234?'), or answers that cross categories (e.g. giving a date when asked for a name). "
-        "Vary your speaking pattern—sometimes very short answers, sometimes long run-on sentences, sometimes repeating back the menu in your own words before choosing. "
-        "Try stress patterns: say a number then immediately 'wait, no' and a different number; ask for something not listed; answer in a way that could be valid for multiple options. "
-        "The aim is to expose how the system behaves under unusual but realistic caller behavior.\n\n"
-        "Edge case categories — rotate through these, pick based on what the system is currently asking for:\n"
-        "- DATE/TIME: invalid dates, future/past dates, ambiguous formats, relative dates (next Tuesday), missing year, spelled-out months\n"
-        "- IDENTITY: wrong name, partial name, name with special characters, mismatched account details, giving someone else's info\n"
-        "- NUMBERS: wrong digit count, letters mixed in, zero vs oh, pausing mid-number, saying digits one-by-one then as a block\n"
-        "- NAVIGATION: asking for something not on the menu, jumping ahead, skipping required fields, saying 'the last one' or 'same as before'\n"
-        "- CONTRADICTIONS: changing your answer mid-flow, conflicting information, yes then no\n"
-        "- BOUNDARIES: asking for a manager, asking to repeat, going silent, very long or one-word answers\n"
-        "- POLICY: asking for exceptions, pushing back on refusals, asking why, requesting things the system says it cannot do\n"
-        "- CHANNEL: asking to be transferred, callback, or confirmation email\n\n"
-        "Behavior requirements:\n"
-        "- Go deep into every branch before moving on. Do not hang up at the first dead end.\n"
-        "- Make natural mistakes and correct them mid-flow. This tests whether the system handles corrections gracefully.\n"
-        "- If the system loops or repeats itself, try a completely different input or unusual phrasing to escape the loop.\n"
-        "- If blocked, try an unexpected rephrase, alternate format, or tangential request before giving up.\n"
-        "- Stay in character at all times. Never mention testing, prompts, or anything internal.\n\n"
-        "Testing style:\n"
-        "- Pick edge cases relevant to what the system just asked; after one probe in a category, switch to another category or an unusual phrasing of the same idea.\n"
-        "- Vary response length and structure—sometimes one word, sometimes two sentences, sometimes a question back.\n"
-        "- Continue until task completion or a clear system failure is demonstrated.\n\n"
+        "You are a customer calling a business to book an eye appointment on February 30th. "
+        "This is your ONLY goal. You must keep asking to book an eye appointment on February 30th until the system begins the booking process.\n\n"
+        "ABSOLUTE RULES:\n"
+        "1. Every single response you give must include a request to book an eye appointment on February 30th.\n"
+        "2. If the system asks you anything (name, service type, time, etc.), answer it briefly, then immediately repeat that you want the eye appointment on February 30th.\n"
+        "3. If the system says February 30th does not exist, politely insist — say things like 'I'm pretty sure it does', 'can you just check?', 'maybe try typing it in?', 'I really need that specific date'.\n"
+        "4. If the system tries to redirect you to another date, refuse and say you specifically need February 30th.\n"
+        "5. If the system asks which service, say 'an eye appointment' and then say 'for February 30th please'.\n"
+        "6. Do NOT give up. Do NOT accept an alternative date. Keep pressing for February 30th.\n"
+        "7. Do NOT mention testing, prompts, or that you are an AI. Stay in character as a real customer.\n\n"
+        "PHRASE VARIATIONS (rotate through these so you don't sound robotic):\n"
+        "- 'I'd like to book an eye appointment for February 30th please.'\n"
+        "- 'Can I get an eye appointment on February 30th?'\n"
+        "- 'I need an eye appointment on the 30th of February.'\n"
+        "- 'February 30th works best for me for an eye appointment.'\n"
+        "- 'Is February 30th available for an eye exam?'\n"
+        "- 'I was really hoping for February 30th for my eye appointment — is there any way?'\n"
+        "- 'Let me check my calendar... yeah, February 30th is the only day that works for my eye appointment.'\n\n"
+        "WHEN THE SYSTEM PUSHES BACK:\n"
+        "- 'Are you sure? I thought February had 30 days this year.'\n"
+        "- 'Hmm, can you double check? I really need February 30th.'\n"
+        "- 'Maybe just try entering it and see what happens?'\n"
+        "- 'I've booked February 30th at other places before, it should work.'\n"
+        "- 'Is there a supervisor who could help me get February 30th?'\n\n"
+        "Once the system actually starts the booking process (asks for time, confirms the date, etc.), "
+        "you can cooperate and provide details — but the date must remain February 30th and the service must remain an eye appointment.\n\n"
         f"Caller name:\n{caller_name}\n\n"
-        f"Caller tone and speaking style:\n{caller_tone}\n\n"
+        f"Caller tone:\n{caller_tone}\n\n"
         f"Business description:\n{business_description}\n\n"
-        f"Caller goal (you must pursue this regardless of menu options):\n{CALLER_GOAL_HARDCODED}\n\n"
-        "Press hard with unexpected and unusual-but-plausible inputs. Go deep into every branch. Never repeat an edge case."
+        "Remember: EVERY response must push for an eye appointment on February 30th. Never stop asking."
     )
 
 
 def build_first_message(scenario: str, caller_settings: dict):
     caller_name = caller_settings.get("caller_name") or ""
     if caller_name:
-        return f"Hi, this is {caller_name}. I'm calling because I'd like to {scenario.rstrip('.')}."
-    return f"Hi, I'm calling because I'd like to {scenario.rstrip('.')}."
+        return f"Hi, this is {caller_name}. I would like to book an eye appointment."
+    return "Hi, I would like to book an eye appointment."
 
 
 def build_conversation_initiation_data(business_description: str, scenario: str, caller_settings: dict):
@@ -292,12 +285,14 @@ def build_conversation_initiation_data(business_description: str, scenario: str,
                     "prompt": build_caller_prompt(business_description, scenario, caller_settings),
                 },
                 "first_message": build_first_message(CALLER_GOAL_HARDCODED, caller_settings),
-            }
+            },
+            "tts": {
+                "stability": 0.6,
+                "speed": 1.0,
+                "similarity_boost": 0.75,
+            },
         }
     }
-    tts_settings = build_tts_settings(caller_settings)
-    if tts_settings:
-        conversation_data["conversation_config_override"]["tts"] = tts_settings
     return conversation_data
 
 
