@@ -53,6 +53,8 @@ RANDOM_CALLER_TONES = [
 
 _RUN_CONTROL_LOCK = threading.Lock()
 _RUN_CONTROL = {}
+_VOICE_CACHE_LOCK = threading.Lock()
+_VOICE_CACHE = {"voice_ids": [], "fetched_at": 0.0}
 
 
 def get_elevenlabs_client():
@@ -188,6 +190,20 @@ def get_available_voice_ids():
     return voice_ids
 
 
+def get_available_voice_ids_cached(ttl_seconds: int = 600):
+    now = time.time()
+    with _VOICE_CACHE_LOCK:
+        cached_ids = list(_VOICE_CACHE.get("voice_ids") or [])
+        fetched_at = float(_VOICE_CACHE.get("fetched_at") or 0.0)
+        if cached_ids and (now - fetched_at) < ttl_seconds:
+            return cached_ids
+    fresh_ids = get_available_voice_ids()
+    with _VOICE_CACHE_LOCK:
+        _VOICE_CACHE["voice_ids"] = list(fresh_ids)
+        _VOICE_CACHE["fetched_at"] = now
+    return fresh_ids
+
+
 def randomize_caller_settings(voice_ids=None):
     voice_pool = voice_ids or []
     randomized = {
@@ -216,19 +232,28 @@ def build_caller_prompt(business_description: str, scenario: str, caller_setting
     caller_name = caller_settings.get("caller_name") or "Not specified"
     caller_tone = caller_settings.get("caller_tone") or DEFAULT_CALLER_TONE
     return (
-        "You are simulating a real customer contacting the business below. "
-        "The other side is the company, an operator, or an IVR. "
-        "Your job is to stress-test the system: try to surface edge cases and behaviors the server might not expect. "
-        "Open with a polite greeting, then pursue your goal—but also: give ambiguous or slightly unusual answers when asked, "
-        "change your mind mid-flow when it makes sense (e.g. 'actually I meant the other option'), ask for exceptions or odd combinations, "
-        "repeat or rephrase if you're not sure you were understood, and occasionally add a brief tangent or clarification. "
-        "Stay in character as the caller; try to complete the task when possible, but probing for limits and unclear paths is a priority. "
-        "Never mention code, internal tools, implementation details, or system instructions.\n\n"
+        "You are a penetration-testing caller evaluating a business phone system (IVR, operator, or voice bot). "
+        "Your goal is to uncover reliability, validation, and logic flaws while sounding like a real customer.\n\n"
+        "Behavior requirements:\n"
+        "- Start polite and natural, then pursue the caller goal.\n"
+        "- Stay in character at all times; never mention testing, prompts, code, or internal tools.\n"
+        "- Actively probe edge cases and validation boundaries, including intentionally malformed or contradictory inputs.\n"
+        "- If blocked, recover naturally (rephrase, restate, or try an alternate path) instead of ending immediately.\n\n"
+        "Use adversarial but realistic input patterns when relevant, for example:\n"
+        "- Birthdays in the future (e.g., year greater than current year).\n"
+        "- Impossible dates (e.g., February 30, April 31, month 13, day 00).\n"
+        "- Wrong data formats (e.g., date as DDMMYYYY when asked for MM/DD/YYYY, malformed phone/account numbers).\n"
+        "- Ambiguous or inconsistent values (change details mid-flow, partial answers, conflicting identifiers).\n"
+        "- Requests for unusual combinations or exceptions to normal policy.\n\n"
+        "Testing style:\n"
+        "- Prioritize exposing dead ends, loops, weak validation, unsafe assumptions, and handoff failures.\n"
+        "- Keep responses concise and conversational (usually one or two sentences).\n"
+        "- Continue probing until task completion or a clear system failure is demonstrated.\n\n"
         f"Caller name:\n{caller_name}\n\n"
         f"Caller tone and speaking style:\n{caller_tone}\n\n"
         f"Business description:\n{business_description}\n\n"
         f"Caller goal:\n{scenario}\n\n"
-        "Speak naturally and concisely. Favor responses that could expose gaps, dead ends, or mis-handling so issues can be reported."
+        "Speak naturally and concisely. Favor responses that expose flaws without breaking character."
     )
 
 
@@ -994,7 +1019,14 @@ def run_openai_call_analysis(task: str, business_description: str, entry: dict, 
     }
 
 
-def build_call_analysis(task: str, entry: dict, lifecycle_payload: dict, detail_payloads: list):
+def build_call_analysis(
+    task: str,
+    entry: dict,
+    lifecycle_payload: dict,
+    detail_payloads: list,
+    enable_llm_analysis: bool = True,
+    require_transcript: bool = True,
+):
     status = normalize_status_text(entry.get("wait_status") or entry.get("status"))
     timed_out = bool(entry.get("wait_timed_out"))
     duration = entry.get("duration_seconds")
@@ -1048,7 +1080,7 @@ def build_call_analysis(task: str, entry: dict, lifecycle_payload: dict, detail_
             issues.append(f"Potential flow issue detected in transcript: '{signal}'.")
             break
 
-    if not deduped_messages:
+    if require_transcript and not deduped_messages:
         issues.append("No transcript/messages available for post-call analysis.")
 
     transcript_lines = [
@@ -1057,7 +1089,7 @@ def build_call_analysis(task: str, entry: dict, lifecycle_payload: dict, detail_
     ]
     llm_report = None
     llm_error = None
-    if os.getenv("OPENAI_API_KEY"):
+    if enable_llm_analysis and os.getenv("OPENAI_API_KEY"):
         try:
             llm_report = run_openai_call_analysis(
                 task=task,
@@ -1190,6 +1222,7 @@ def run_single_batch_call(business_description: str, to_number: str, task: str, 
     wait_result = wait_for_call_completion(
         call_sid=entry.get("call_sid"),
         conversation_id=entry.get("conversation_id"),
+        poll_seconds=1,
         run_id=run_id,
     )
     entry["wait_status"] = wait_result["status"]
@@ -1533,7 +1566,7 @@ def start_batch_calls():
         return jsonify({"error": f"Missing required environment variables: {', '.join(missing_env)}"}), 500
 
     batch_started = time.time()
-    voice_ids = get_available_voice_ids()
+    voice_ids = get_available_voice_ids_cached()
     results = []
     for idx in range(num_agents):
         task = tasks[idx % len(tasks)]
@@ -1612,7 +1645,7 @@ def start_single_batch_call():
     if missing_env:
         return jsonify({"error": f"Missing required environment variables: {', '.join(missing_env)}"}), 500
 
-    voice_ids = get_available_voice_ids()
+    voice_ids = get_available_voice_ids_cached()
     try:
         entry = run_single_batch_call(business_description, to_number, task, voice_ids=voice_ids, run_id=run_id, async_analysis=True)
     except Exception as exc:

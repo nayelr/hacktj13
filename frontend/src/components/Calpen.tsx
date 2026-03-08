@@ -25,6 +25,8 @@ type AgentCardState = {
     result_summary?: string;
     issues_detected?: string[];
     call_sid?: string;
+    analysis_id?: string;
+    analysis_pending?: boolean;
     analysis_report?: {
       model?: string;
       confidence?: string;
@@ -32,6 +34,7 @@ type AgentCardState = {
       edge_cases?: string[];
       recommendations?: string[];
     };
+    transcript_excerpt?: string[];
     analysis_error?: string;
     error?: string;
   };
@@ -95,6 +98,31 @@ function createRunId() {
     return crypto.randomUUID();
   }
   return `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function mergeAgentResults(
+  agents: AgentCardState[],
+  index: number,
+  updates: Partial<AgentCardState>
+) {
+  return agents.map((agent) => (agent.index === index ? { ...agent, ...updates } : agent));
+}
+
+function mergeAgentResultPayload(
+  agents: AgentCardState[],
+  index: number,
+  resultUpdates: Partial<NonNullable<AgentCardState["result"]>>,
+  stateOverride?: AgentCardState["state"]
+) {
+  return agents.map((agent) =>
+    agent.index === index
+      ? {
+          ...agent,
+          ...(stateOverride ? { state: stateOverride } : {}),
+          result: { ...agent.result, ...resultUpdates },
+        }
+      : agent
+  );
 }
 
 async function postJson(path: string, body: unknown, signal?: AbortSignal) {
@@ -281,10 +309,12 @@ function InputPage({
 
 function LivePage({
   cfg,
+  onProgress,
   onDone,
   onCancel,
 }: {
   cfg: RunConfig;
+  onProgress: (results: AgentCardState[]) => void;
   onDone: (results: AgentCardState[]) => void;
   onCancel: () => void;
 }) {
@@ -320,11 +350,17 @@ function LivePage({
     setAgents(initialAgents);
     startedAtRef.current = Date.now();
     setElapsedSec(0);
-  }, [initialAgents]);
+    onProgress(initialAgents);
+  }, [initialAgents, onProgress]);
 
   useEffect(() => {
     cancelledRef.current = false;
     let currentAgents = initialAgents.map((agent) => ({ ...agent }));
+    const publishAgents = (nextAgents: AgentCardState[]) => {
+      currentAgents = nextAgents;
+      setAgents(nextAgents);
+      onProgress(nextAgents);
+    };
 
     async function run() {
       try {
@@ -346,10 +382,9 @@ function LivePage({
         const idx = i + 1;
         const task = cfg.tasks[i % cfg.tasks.length];
         setStatusText(`Running agent ${idx} of ${cfg.numAgents}...`);
-        currentAgents = currentAgents.map((agent) =>
-          agent.index === idx ? { ...agent, state: "calling", startedAtMs: Date.now() } : agent
+        publishAgents(
+          mergeAgentResults(currentAgents, idx, { state: "calling", startedAtMs: Date.now() })
         );
-        setAgents([...currentAgents]);
 
         try {
           skipRef.current = false;
@@ -364,58 +399,34 @@ function LivePage({
           }, ac.signal);
           if (cancelledRef.current) return;
           const result = data?.result || {};
-          const analysisId = result.analysis_id as string | undefined;
-          currentAgents = currentAgents.map((agent) =>
-            agent.index === idx
-              ? {
-                  ...agent,
-                  state: result.status === "failed" ? "failed" : "done",
-                  finishedAtMs: Date.now(),
-                  result,
-                }
-              : agent
+          publishAgents(
+            mergeAgentResults(currentAgents, idx, {
+              state: result.status === "failed" ? "failed" : "done",
+              finishedAtMs: Date.now(),
+              result,
+            })
           );
-          setAgents([...currentAgents]);
-          if (analysisId) {
-            const capturedIdx = idx;
-            pollAnalysis(analysisId).then((analysisResult) => {
-              if (!analysisResult || cancelledRef.current) return;
-              setAgents((prev) =>
-                prev.map((a) =>
-                  a.index === capturedIdx ? { ...a, result: { ...a.result, ...(analysisResult as AgentCardState["result"]) } } : a
-                )
-              );
-            });
-          }
         } catch (err) {
           if (isAbortError(err) || cancelledRef.current) return;
           if (skipRef.current) {
             skipRef.current = false;
-            currentAgents = currentAgents.map((agent) =>
-              agent.index === idx
-                ? {
-                    ...agent,
-                    state: "done",
-                    finishedAtMs: Date.now(),
-                    result: { status: "skipped", result_summary: "Skipped by user." },
-                  }
-                : agent
+            publishAgents(
+              mergeAgentResults(currentAgents, idx, {
+                state: "done",
+                finishedAtMs: Date.now(),
+                result: { status: "skipped", result_summary: "Skipped by user." },
+              })
             );
-            setAgents([...currentAgents]);
             continue;
           }
           const msg = err instanceof Error ? err.message : "Call failed.";
-          currentAgents = currentAgents.map((agent) =>
-            agent.index === idx
-              ? {
-                  ...agent,
-                  state: "failed",
-                  finishedAtMs: Date.now(),
-                  result: { error: msg, status: "failed" },
-                }
-              : agent
+          publishAgents(
+            mergeAgentResults(currentAgents, idx, {
+              state: "failed",
+              finishedAtMs: Date.now(),
+              result: { error: msg, status: "failed" },
+            })
           );
-          setAgents([...currentAgents]);
         }
       }
 
@@ -434,7 +445,7 @@ function LivePage({
       cancelledRef.current = true;
       abortControllerRef.current?.abort();
     };
-  }, [cfg.description, cfg.numAgents, cfg.phone, cfg.tasks, cfg.websiteUrl, initialAgents, onDone]);
+  }, [cfg.description, cfg.numAgents, cfg.phone, cfg.tasks, cfg.websiteUrl, initialAgents, onDone, onProgress]);
 
   const handleSkip = () => {
     skipRef.current = true;
@@ -463,11 +474,7 @@ function LivePage({
   );
   const progress = Math.round((doneCount / cfg.numAgents) * 100);
   const knownCallDurationTotal = useMemo(
-    () =>
-      agents.reduce((sum, a) => {
-        const value = Number(a.result?.duration_seconds);
-        return Number.isNaN(value) || value < 0 ? sum : sum + value;
-      }, 0),
+    () => agents.reduce((sum, a) => sum + getAgentDuration(a), 0),
     [agents]
   );
 
@@ -553,6 +560,9 @@ function LivePage({
                   <span className="text-[var(--calpen-label)] uppercase text-[10px] tracking-wider mr-2">Summary</span>
                   {agent.result.result_summary}
                 </p>
+              ) : null}
+              {agent.result?.analysis_pending ? (
+                <p className="text-xs text-[var(--calpen-amber)] mb-2">Post-call analysis pending...</p>
               ) : null}
               {issues.length ? (
                 <div className="mb-2">
@@ -833,6 +843,7 @@ function ReportPage({
                     <p className="font-serif text-sm text-gray-400">
                       {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)} · {severityBreakdown}
                     </p>
+                    {agent.result?.analysis_pending ? <p className="font-serif text-xs text-[var(--calpen-amber)] mt-1">Post-call analysis pending...</p> : null}
                   </div>
                   <span className="font-serif text-sm text-gray-500">
                     {isExpanded ? "Hide details" : "Show details"}
@@ -889,6 +900,51 @@ export default function Calpen() {
   const [page, setPage] = useState<"input" | "live" | "report">("input");
   const [cfg, setCfg] = useState<RunConfig | null>(null);
   const [results, setResults] = useState<AgentCardState[]>([]);
+  const activeAnalysisPollsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+
+    results.forEach((agent) => {
+      const analysisId = agent.result?.analysis_id;
+      if (!analysisId || !agent.result?.analysis_pending || activeAnalysisPollsRef.current.has(analysisId)) {
+        return;
+      }
+
+      activeAnalysisPollsRef.current.add(analysisId);
+      pollAnalysis(analysisId, 240000)
+        .then((analysisResult) => {
+          if (cancelled) return;
+          if (!analysisResult) {
+            setResults((prev) =>
+              mergeAgentResultPayload(prev, agent.index, {
+                analysis_pending: false,
+                analysis_error: prev.find((item) => item.index === agent.index)?.result?.analysis_error || "Timed out waiting for post-call analysis.",
+              })
+            );
+            return;
+          }
+
+          setResults((prev) =>
+            mergeAgentResultPayload(
+              prev,
+              agent.index,
+              {
+                ...(analysisResult as Partial<NonNullable<AgentCardState["result"]>>),
+                analysis_pending: false,
+              }
+            )
+          );
+        })
+        .finally(() => {
+          activeAnalysisPollsRef.current.delete(analysisId);
+        });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [results]);
 
   return (
     <div className="min-h-screen bg-[#13110e] text-white">
@@ -906,6 +962,7 @@ export default function Calpen() {
         <div className="pt-24 pb-12">
           <LivePage
             cfg={cfg}
+            onProgress={setResults}
             onDone={(nextResults) => {
               setResults(nextResults);
               setPage("report");
