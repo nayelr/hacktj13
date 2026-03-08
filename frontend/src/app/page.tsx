@@ -1,6 +1,7 @@
 import { Navbar } from "@/components/Navbar";
 import { Hero } from "@/components/Hero";
 import { Stats } from "@/components/Stats";
+import { CustomAgents } from "@/components/CustomAgents";
 import { CTA } from "@/components/CTA";
 import { Footer } from "@/components/Footer";
 
@@ -10,6 +11,7 @@ export default function Home() {
       <Navbar />
       <Hero />
       <Stats />
+      <CustomAgents />
       <CTA />
       <Footer />
     </main>

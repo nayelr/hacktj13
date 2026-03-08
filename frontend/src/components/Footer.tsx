@@ -8,8 +8,8 @@ const productLinks = [
 ];
 
 const resourceLinks = [
-  { name: "Privacy Policy", href: "#" },
-  { name: "Terms of Service", href: "#" },
+  { name: "Privacy Policy", href: "/privacy" },
+  { name: "Terms of Service", href: "/terms" },
 ];
 
 export function Footer() {

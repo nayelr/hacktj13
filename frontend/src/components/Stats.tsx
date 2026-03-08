@@ -41,6 +41,63 @@ function AnimatedCounter({ target, suffix = "" }: { target: number; suffix?: str
   );
 }
 
+const TYPEWRITER_TEXT = "you decide…";
+
+function AgentsCountWithTypewriter() {
+  const [count, setCount] = useState(0);
+  const [typed, setTyped] = useState("");
+  const [phase, setPhase] = useState<"count" | "type">("count");
+  const ref = useRef<HTMLDivElement>(null);
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) setIsVisible(true); },
+      { threshold: 0.5 }
+    );
+    if (ref.current) observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!isVisible) return;
+    if (phase === "count") {
+      const target = 9;
+      const delays = [380, 340, 300, 260, 220, 180, 140, 100, 80];
+      let step = 1;
+      let timeoutId: ReturnType<typeof setTimeout>;
+      const run = () => {
+        setCount(step);
+        if (step >= target) {
+          timeoutId = setTimeout(() => setPhase("type"), delays[delays.length - 1] ?? 80);
+          return;
+        }
+        timeoutId = setTimeout(run, delays[step - 1] ?? 80);
+        step += 1;
+      };
+      run();
+      return () => clearTimeout(timeoutId);
+    }
+    if (phase === "type" && typed.length < TYPEWRITER_TEXT.length) {
+      const baseMs = 70;
+      const minMs = 28;
+      const speedUp = (i: number) => Math.max(minMs, baseMs - i * 4);
+      const i = typed.length;
+      const timeout = setTimeout(() => {
+        setTyped(TYPEWRITER_TEXT.slice(0, i + 1));
+      }, speedUp(i));
+      return () => clearTimeout(timeout);
+    }
+  }, [isVisible, phase, typed]);
+
+  return (
+    <div ref={ref} className="text-5xl md:text-6xl font-light text-white">
+      {count > 0 && <span>{count}</span>}
+      {typed && <span className="text-gray-400 italic"> {typed}</span>}
+    </div>
+  );
+}
+
 export function Stats() {
   return (
     <section id="stats" className="bg-[#13110e] py-16 px-4">
@@ -58,7 +115,7 @@ export function Stats() {
             </div>
             <div className="border-l border-gray-700 pl-6">
               <p className="text-xs uppercase tracking-wider text-gray-500 mb-4">Agents per penetration test</p>
-              <AnimatedCounter target={4} />
+              <AgentsCountWithTypewriter />
             </div>
           </div>
         </div>
