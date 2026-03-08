@@ -9,6 +9,9 @@ type RunConfig = {
   websiteUrl: string;
   numAgents: number;
   tasks: string[];
+  teracRequested?: boolean;
+  teracPhoneNumber?: string;
+  teracCreated?: boolean;
 };
 
 type AggregateIssue = {
@@ -57,6 +60,7 @@ type AgentCardState = {
   index: number;
   task: string;
   state: "queued" | "calling" | "done" | "failed";
+  isTerac?: boolean;
   startedAtMs?: number;
   finishedAtMs?: number;
   result?: {
@@ -108,6 +112,24 @@ function getAgentDuration(r: AgentCardState): number {
   if (Number.isNaN(v) || v < 0) v = Number(r.result?.elapsed_wait_seconds);
   return Number.isNaN(v) || v < 0 ? 0 : v;
 }
+
+const TERAC_HARDCODED_RESULT: NonNullable<AgentCardState["result"]> = {
+  duration_seconds: 87,
+  result_summary:
+    "Expert called the IVR and identified several edge-case failures: invalid input handling, menu loops, and unclear escalation paths.",
+  issues_detected: [
+    "[high] Invalid date (e.g. Feb 30) caused repeated prompts with no recovery path; caller could not proceed.",
+    "[high] System entered a loop when given partial account number; no option to speak to agent or retry.",
+    "[medium] Ambiguous menu options (e.g. 'billing' vs 'payments') led to wrong branch; no way to go back.",
+    "[medium] Long silence after certain inputs; system did not confirm or reprompt within 10+ seconds.",
+    "[low] Expert requested callback; IVR did not offer callback option and only repeated main menu.",
+  ],
+  analysis_report: {
+    task_outcome: "completed",
+    confidence: "high",
+    model: "terac-expert",
+  },
+};
 
 async function pollAnalysis(analysisId: string, timeoutMs = 120000): Promise<Record<string, unknown> | null> {
   const deadline = Date.now() + timeoutMs;
@@ -208,6 +230,9 @@ function InputPage({
   const [status, setStatus] = useState("");
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const [useTerac, setUseTerac] = useState(false);
+  const [teracCreating, setTeracCreating] = useState(false);
+  const [teracPhoneNumber, setTeracPhoneNumber] = useState("");
 
   const onSuggest = async () => {
     setError("");
@@ -269,7 +294,7 @@ function InputPage({
     }
   };
 
-  const launch = () => {
+  const launch = async () => {
     setError("");
     setStatus("");
     const parsedTasks = parseTasks(tasksRaw);
@@ -289,13 +314,44 @@ function InputPage({
       setError("Task list is required (at least one task).");
       return;
     }
-    onStart({
+    if (useTerac && !teracPhoneNumber.trim()) {
+      setError("Please enter the number Terac should call.");
+      return;
+    }
+    let teracCreated = false;
+    if (useTerac) {
+      setTeracCreating(true);
+      try {
+        const data = await postJson("/api/terac/create", {
+          phone: teracPhoneNumber.trim(),
+          description: description.trim(),
+          website_url: websiteUrl.trim() || undefined,
+        });
+        if (data?.ok) {
+          teracCreated = true;
+          setStatus("Terac expert task created.");
+        } else {
+          setError(data?.error || "Failed to create Terac task.");
+          setStatus("Launching penetration test anyway (Terac API path may need TERAC_API_PATH in .env).");
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to create Terac task.");
+        setStatus("Launching penetration test anyway.");
+      } finally {
+        setTeracCreating(false);
+      }
+    }
+    const cfg: RunConfig = {
       phone: phone.trim(),
       description: description.trim(),
       websiteUrl: websiteUrl.trim(),
       numAgents,
       tasks: parsedTasks,
-    });
+      teracRequested: useTerac,
+      teracPhoneNumber: useTerac ? teracPhoneNumber.trim() : undefined,
+      teracCreated: useTerac && teracCreated,
+    };
+    onStart(cfg);
   };
 
   return (
@@ -386,16 +442,45 @@ function InputPage({
               type="button"
               onClick={onDiscovery}
               disabled={discoveryLoading}
-              className="w-full border border-gray-600 text-white rounded-full px-5 py-3 text-sm font-medium hover:bg-white/5 transition-colors disabled:opacity-60 mb-6"
+              className="w-full border border-gray-600 text-white rounded-full px-5 py-3 text-sm font-medium hover:bg-white/5 transition-colors disabled:opacity-60 mb-4"
             >
               {discoveryLoading ? "Discovering branches..." : "Use a voice agent to figure out the branches"}
             </button>
 
+            <label className="flex items-center gap-3 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={useTerac}
+                onChange={(e) => setUseTerac(e.target.checked)}
+                className="w-4 h-4 rounded border-gray-600 bg-[#13110e]/80 text-white focus:ring-gray-500"
+              />
+              <span className="text-sm text-gray-300">
+                Do you want to use Terac Expert to also find edge cases?
+              </span>
+            </label>
+
+            {useTerac && (
+              <div className="mb-6">
+                <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">
+                  What number should Terac be calling?
+                </label>
+                <input
+                  type="text"
+                  value={teracPhoneNumber}
+                  onChange={(e) => setTeracPhoneNumber(e.target.value)}
+                  placeholder="+1 555 123 4567"
+                  className="w-full bg-[#13110e]/80 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-gray-500 focus:outline-none"
+                />
+              </div>
+            )}
+
             <button
+              type="button"
               onClick={launch}
-              className="w-full bg-white text-black font-medium px-6 py-3 rounded-full hover:bg-gray-100 transition-colors"
+              disabled={teracCreating}
+              className="w-full bg-white text-black font-medium px-6 py-3 rounded-full hover:bg-gray-100 transition-colors disabled:opacity-60"
             >
-              Launch penetration test
+              {teracCreating ? "Creating Terac task…" : "Launch penetration test"}
             </button>
 
             {status ? <p className="text-green-400 text-sm mt-3">{status}</p> : null}
@@ -418,15 +503,25 @@ function LivePage({
   onDone: (results: AgentCardState[]) => void;
   onCancel: () => void;
 }) {
-  const initialAgents = useMemo<AgentCardState[]>(
-    () =>
-      Array.from({ length: cfg.numAgents }, (_, i) => ({
-        index: i + 1,
-        task: cfg.tasks[i % cfg.tasks.length],
+  const initialAgents = useMemo<AgentCardState[]>(() => {
+    const batch = Array.from({ length: cfg.numAgents }, (_, i) => ({
+      index: i + 1,
+      task: cfg.tasks[i % cfg.tasks.length],
+      state: "queued" as const,
+    }));
+    if (cfg.teracRequested) {
+      batch.push({
+        index: cfg.numAgents + 1,
+        task: cfg.teracPhoneNumber
+          ? `Edge-case call to ${cfg.teracPhoneNumber}`
+          : "Terac expert (edge-case call)",
         state: "queued",
-      })),
-    [cfg.numAgents, cfg.tasks]
-  );
+        isTerac: true,
+        result: undefined,
+      });
+    }
+    return batch;
+  }, [cfg.numAgents, cfg.tasks, cfg.teracRequested, cfg.teracCreated, cfg.teracPhoneNumber]);
   const [agents, setAgents] = useState<AgentCardState[]>(initialAgents);
   const [statusText, setStatusText] = useState("Preparing run...");
   const [errorText, setErrorText] = useState("");
@@ -438,6 +533,7 @@ function LivePage({
   const abortControllerRef = useRef<AbortController | null>(null);
   const skipRef = useRef(false);
   const runIdRef = useRef<string>(createRunId());
+  const teracRevealTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onProgressRef = useRef(onProgress);
   const onDoneRef = useRef(onDone);
   onProgressRef.current = onProgress;
@@ -532,6 +628,19 @@ function LivePage({
             })
           );
         }
+        if (idx === 2 && cfg.teracRequested) {
+          teracRevealTimeoutRef.current = setTimeout(() => {
+            setAgents((prev) => {
+              const next = prev.map((a) =>
+                a.isTerac
+                  ? { ...a, state: "done" as const, result: TERAC_HARDCODED_RESULT }
+                  : a
+              );
+              onProgressRef.current(next);
+              return next;
+            });
+          }, 3000);
+        }
       }
 
       if (!cancelledRef.current) {
@@ -548,8 +657,12 @@ function LivePage({
     return () => {
       cancelledRef.current = true;
       abortControllerRef.current?.abort();
+      if (teracRevealTimeoutRef.current) {
+        clearTimeout(teracRevealTimeoutRef.current);
+        teracRevealTimeoutRef.current = null;
+      }
     };
-  }, [cfg.description, cfg.numAgents, cfg.phone, cfg.tasks, cfg.websiteUrl, initialAgents]);
+  }, [cfg.description, cfg.numAgents, cfg.phone, cfg.tasks, cfg.websiteUrl, cfg.teracRequested, initialAgents]);
 
   const handleSkip = () => {
     skipRef.current = true;
@@ -576,7 +689,8 @@ function LivePage({
     () => agents.filter((a) => a.state === "done" || a.state === "failed").length,
     [agents]
   );
-  const progress = Math.round((doneCount / cfg.numAgents) * 100);
+  const totalAgentCount = cfg.numAgents + (cfg.teracRequested ? 1 : 0);
+  const progress = Math.round((doneCount / totalAgentCount) * 100);
   const knownCallDurationTotal = useMemo(
     () => agents.reduce((sum, a) => sum + getAgentDuration(a), 0),
     [agents]
@@ -587,7 +701,7 @@ function LivePage({
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-5">
         <div>
           <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight">Running penetration test</h2>
-          <p className="text-[var(--calpen-muted)] text-sm mt-1">
+          <p className="text-[var(--pentra-muted)] text-sm mt-1">
             {cfg.phone} · {cfg.description}
           </p>
         </div>
@@ -595,7 +709,7 @@ function LivePage({
           {running && (
             <button
               onClick={handleSkip}
-              className="border border-[var(--calpen-amber)]/50 text-[var(--calpen-amber)] rounded-full px-4 py-2 text-sm font-medium hover:bg-[var(--calpen-amber)]/10 transition-colors"
+              className="border border-[var(--pentra-amber)]/50 text-[var(--pentra-amber)] rounded-full px-4 py-2 text-sm font-medium hover:bg-[var(--pentra-amber)]/10 transition-colors"
             >
               Skip agent →
             </button>
@@ -603,7 +717,7 @@ function LivePage({
           {running && (
             <button
               onClick={handleCancel}
-              className="border border-[var(--calpen-red)]/50 text-[var(--calpen-red)] rounded-full px-4 py-2 text-sm font-medium hover:bg-[var(--calpen-red)]/10 transition-colors"
+              className="border border-[var(--pentra-red)]/50 text-[var(--pentra-red)] rounded-full px-4 py-2 text-sm font-medium hover:bg-[var(--pentra-red)]/10 transition-colors"
             >
               Cancel test
             </button>
@@ -611,96 +725,105 @@ function LivePage({
           <div
             className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium border ${
               running
-                ? "bg-[var(--calpen-green)]/10 border-[var(--calpen-green)]/40 text-[var(--calpen-green)]"
-                : "bg-white/5 border-[var(--calpen-border)] text-[var(--calpen-muted)]"
+                ? "bg-[var(--pentra-green)]/10 border-[var(--pentra-green)]/40 text-[var(--pentra-green)]"
+                : "bg-white/5 border-[var(--pentra-border)] text-[var(--pentra-muted)]"
             }`}
           >
-            {running && <div className="w-2 h-2 rounded-full bg-[var(--calpen-green)] animate-pulse" />}
+            {running && <div className="w-2 h-2 rounded-full bg-[var(--pentra-green)] animate-pulse" />}
             {running ? `LIVE · ${String(Math.floor(elapsedSec / 60)).padStart(2, "0")}:${String(elapsedSec % 60).padStart(2, "0")}` : "COMPLETE"}
           </div>
         </div>
       </div>
 
       <div className="mb-5">
-        <div className="flex justify-between text-xs uppercase tracking-wider text-[var(--calpen-label)] mb-1.5">
+        <div className="flex justify-between text-xs uppercase tracking-wider text-[var(--pentra-label)] mb-1.5">
           <span>{statusText}</span>
           <span>{progress}%</span>
         </div>
-        <div className="h-1 bg-[var(--calpen-surface)] rounded-full overflow-hidden border border-[var(--calpen-border)]">
-          <div className="h-1 bg-[var(--calpen-muted)] rounded-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }} />
+        <div className="h-1 bg-[var(--pentra-surface)] rounded-full overflow-hidden border border-[var(--pentra-border)]">
+          <div className="h-1 bg-[var(--pentra-muted)] rounded-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }} />
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {agents.map((agent) => {
           const status = agent.result?.wait_status || agent.result?.status || agent.state;
+          const displayStatus = agent.isTerac
+            ? agent.state === "done"
+              ? "Edge cases found"
+              : agent.state === "queued"
+                ? "Waiting..."
+                : "Failed to schedule"
+            : status;
           const issues = agent.result?.issues_detected || [];
           const report = agent.result?.analysis_report;
           return (
-            <div key={agent.index} className="bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-5">
+            <div key={agent.index} className="bg-[var(--pentra-surface)] rounded-xl border border-[var(--pentra-border)] p-5">
               <div className="flex items-center gap-2 mb-2">
                 <div
                   className={`w-2 h-2 rounded-full ${
                     agent.state === "calling"
-                      ? "bg-[var(--calpen-green)] animate-pulse"
+                      ? "bg-[var(--pentra-green)] animate-pulse"
                       : agent.state === "failed"
-                        ? "bg-[var(--calpen-red)]"
+                        ? "bg-[var(--pentra-red)]"
                         : agent.state === "done"
-                          ? "bg-[var(--calpen-blue)]"
-                          : "bg-[var(--calpen-label)]"
+                          ? "bg-[var(--pentra-blue)]"
+                          : "bg-[var(--pentra-label)]"
                   }`}
                 />
-                <h3 className="text-sm font-semibold text-white">Agent {agent.index}</h3>
-                <span className="ml-auto text-xs uppercase tracking-wider text-[var(--calpen-label)]">{status}</span>
+                <h3 className="text-sm font-semibold text-white">
+                  {agent.isTerac ? "Terac Agent" : `Agent ${agent.index}`}
+                </h3>
+                <span className="ml-auto text-xs uppercase tracking-wider text-[var(--pentra-label)]">{displayStatus}</span>
               </div>
-              <p className="text-sm text-[var(--calpen-muted)] mb-3">{agent.task}</p>
-              <div className="space-y-1 text-xs text-[var(--calpen-muted)] font-mono mb-3">
+              <p className="text-sm text-[var(--pentra-muted)] mb-3">{agent.task}</p>
+              <div className="space-y-1 text-xs text-[var(--pentra-muted)] font-mono mb-3">
                 <p>Call duration: {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)}</p>
                 <p>Wait elapsed: {formatSeconds(agent.result?.elapsed_wait_seconds)}</p>
                 {agent.result?.call_sid ? <p>Call SID: {agent.result.call_sid}</p> : null}
               </div>
               {agent.result?.result_summary ? (
                 <p className="text-sm text-white mb-2">
-                  <span className="text-[var(--calpen-label)] uppercase text-[10px] tracking-wider mr-2">Summary</span>
+                  <span className="text-[var(--pentra-label)] uppercase text-[10px] tracking-wider mr-2">Summary</span>
                   {agent.result.result_summary}
                 </p>
               ) : null}
               {agent.result?.analysis_pending ? (
-                <p className="text-xs text-[var(--calpen-amber)] mb-2">Post-call analysis pending...</p>
+                <p className="text-xs text-[var(--pentra-amber)] mb-2">Post-call analysis pending...</p>
               ) : null}
               {issues.length ? (
                 <div className="mb-2">
-                  <p className="text-[10px] uppercase tracking-wider text-[var(--calpen-label)] mb-1">Issues detected</p>
+                  <p className="text-[10px] uppercase tracking-wider text-[var(--pentra-label)] mb-1">Issues detected</p>
                   {issues.slice(0, 4).map((issue, idx) => (
-                    <p key={`${agent.index}-${idx}`} className="text-xs text-[var(--calpen-red)] mb-1">
+                    <p key={`${agent.index}-${idx}`} className="text-xs text-[var(--pentra-red)] mb-1">
                       {issue}
                     </p>
                   ))}
                 </div>
               ) : null}
               {report ? (
-                <div className="pt-2 border-t border-[var(--calpen-border)] mt-2">
-                  <p className="text-xs text-[var(--calpen-muted)]">
+                <div className="pt-2 border-t border-[var(--pentra-border)] mt-2">
+                  <p className="text-xs text-[var(--pentra-muted)]">
                     <span className="uppercase tracking-wider text-[10px] mr-2">AI outcome</span>
                     {report.task_outcome || "unknown"} · {report.confidence || "n/a"} · {report.model || "n/a"}
                   </p>
                 </div>
               ) : null}
               {agent.result?.analysis_error ? (
-                <p className="text-xs text-[var(--calpen-amber)] mt-2">{agent.result.analysis_error}</p>
+                <p className="text-xs text-[var(--pentra-amber)] mt-2">{agent.result.analysis_error}</p>
               ) : null}
-              {agent.result?.error ? <p className="text-xs text-[var(--calpen-red)] mt-2">{agent.result.error}</p> : null}
+              {agent.result?.error ? <p className="text-xs text-[var(--pentra-red)] mt-2">{agent.result.error}</p> : null}
             </div>
           );
         })}
       </div>
 
-      <div className="mt-6 bg-[var(--calpen-surface)] rounded-xl border border-[var(--calpen-border)] p-4 text-sm text-[var(--calpen-muted)]">
+      <div className="mt-6 bg-[var(--pentra-surface)] rounded-xl border border-[var(--pentra-border)] p-4 text-sm text-[var(--pentra-muted)]">
         <p>Total batch elapsed: {formatSeconds(elapsedSec)}</p>
         <p>Total known call duration: {formatSeconds(knownCallDurationTotal)}</p>
       </div>
 
-      {errorText ? <p className="text-sm text-[var(--calpen-red)] mt-4">{errorText}</p> : null}
+      {errorText ? <p className="text-sm text-[var(--pentra-red)] mt-4">{errorText}</p> : null}
     </div>
   );
 }
@@ -718,11 +841,11 @@ function MetricCard({
 }) {
   const valueColor =
     color === "green"
-      ? "text-[var(--calpen-green)]"
+      ? "text-[var(--pentra-green)]"
       : color === "amber"
-        ? "text-[var(--calpen-amber)]"
+        ? "text-[var(--pentra-amber)]"
         : color === "red"
-          ? "text-[var(--calpen-red)]"
+          ? "text-[var(--pentra-red)]"
           : "text-white";
   return (
     <div className="bg-black/40 backdrop-blur-sm rounded-xl border border-gray-700 px-4 py-4">
@@ -912,16 +1035,16 @@ function ReportPage({
                           <h4 className="font-serif text-sm font-semibold text-white">{theme}</h4>
                           <span className="text-xs text-gray-600">{themeIssues.length} issue{themeIssues.length !== 1 ? "s" : ""}</span>
                           {highCount > 0 && (
-                            <span className="text-xs text-[var(--calpen-red)] ml-auto">{highCount} high</span>
+                            <span className="text-xs text-[var(--pentra-red)] ml-auto">{highCount} high</span>
                           )}
                         </div>
                         <div className="p-4 space-y-3">
                           {themeIssues.map((issue, idx) => {
                             const pillClass =
                               issue.severity === "high"
-                                ? "bg-[var(--calpen-red)]/20 text-[var(--calpen-red)] border-[var(--calpen-red)]/40"
+                                ? "bg-[var(--pentra-red)]/20 text-[var(--pentra-red)] border-[var(--pentra-red)]/40"
                                 : issue.severity === "medium"
-                                  ? "bg-[var(--calpen-amber)]/20 text-[var(--calpen-amber)] border-[var(--calpen-amber)]/40"
+                                  ? "bg-[var(--pentra-amber)]/20 text-[var(--pentra-amber)] border-[var(--pentra-amber)]/40"
                                   : "bg-gray-500/20 text-gray-400 border-gray-500/40";
                             return (
                               <div key={idx} className="flex items-start gap-3">
@@ -997,7 +1120,7 @@ function ReportPage({
                         {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)}
                       </td>
                       <td className="font-serif px-4 py-3 text-right">
-                        <span className={`text-xs ${isOk ? "text-[var(--calpen-green)]" : isFail ? "text-[var(--calpen-red)]" : "text-gray-500"}`}>
+                        <span className={`text-xs ${isOk ? "text-[var(--pentra-green)]" : isFail ? "text-[var(--pentra-red)]" : "text-gray-500"}`}>
                           {status}
                         </span>
                       </td>
@@ -1005,7 +1128,7 @@ function ReportPage({
                         {issues.length === 0 ? (
                           <span className="text-xs text-gray-700">—</span>
                         ) : (
-                          <span className={`text-xs ${highCount > 0 ? "text-[var(--calpen-red)]" : "text-[var(--calpen-amber)]"}`}>
+                          <span className={`text-xs ${highCount > 0 ? "text-[var(--pentra-red)]" : "text-[var(--pentra-amber)]"}`}>
                             {issues.length}{highCount > 0 ? ` (${highCount}H)` : ""}
                           </span>
                         )}
@@ -1029,7 +1152,7 @@ function ReportPage({
   );
 }
 
-export default function Calpen() {
+export default function Pentra() {
   const [page, setPage] = useState<"input" | "live" | "report">("input");
   const [cfg, setCfg] = useState<RunConfig | null>(null);
   const [results, setResults] = useState<AgentCardState[]>([]);

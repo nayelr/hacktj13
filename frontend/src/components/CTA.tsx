@@ -23,10 +23,10 @@ export function CTA() {
           </div>
           <div>
             <p className="text-gray-400 leading-relaxed mb-6">
-              Calpen runs automated penetration tests on your phone system. Get a full IVR tree map, human necessity score, and ranked friction points—no manual dialing.
+              Pentra runs automated penetration tests on your phone system. Get a full IVR tree map, human necessity score, and ranked friction points—no manual dialing.
             </p>
             <Link
-              href="/calpen"
+              href="/pentra"
               className="inline-flex items-center gap-2 bg-white text-black rounded-full px-6 py-3 font-medium hover:bg-gray-100 transition-colors"
             >
               Launch penetration test

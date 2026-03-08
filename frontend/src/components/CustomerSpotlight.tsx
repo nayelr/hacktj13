@@ -9,7 +9,7 @@ export function CustomerSpotlight() {
         <div className="mb-12">
           <div className="flex items-center gap-2 mb-4">
             <span className="w-2 h-2 bg-orange-500 rounded-full" />
-            <span className="text-xs uppercase tracking-wider text-gray-500">Why Calpen</span>
+            <span className="text-xs uppercase tracking-wider text-gray-500">Why Pentra</span>
           </div>
           <h2 className="font-serif text-4xl md:text-5xl text-white leading-tight">
             Know exactly where
@@ -32,12 +32,12 @@ export function CustomerSpotlight() {
             </div>
             <div className="p-8 flex flex-col justify-center">
               <div className="flex items-center gap-2 mb-4">
-                <span className="text-white font-medium">Calpen</span>
+                <span className="text-white font-medium">Pentra</span>
               </div>
               <h3 className="text-2xl text-white font-medium mb-4">
                 Full IVR tree map, human necessity score, and ranked friction points—in one run.
               </h3>
-              <Link href="/calpen" className="inline-flex items-center gap-2 bg-[#252320] rounded-lg px-4 py-2 text-sm text-white hover:bg-[#2a2825] transition-colors w-fit mb-8">
+              <Link href="/pentra" className="inline-flex items-center gap-2 bg-[#252320] rounded-lg px-4 py-2 text-sm text-white hover:bg-[#2a2825] transition-colors w-fit mb-8">
                 Launch penetration test
               </Link>
               <div className="border-t border-gray-800 pt-6">

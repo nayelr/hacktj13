@@ -32,7 +32,7 @@ export function AgentCanvas() {
             <p className="text-gray-500 text-sm mb-4 max-w-sm">
               Launch a test, watch agents run sequentially, and get the full IVR tree and friction report.
             </p>
-            <Link href="/calpen" className="inline-flex items-center gap-2 border border-gray-700 rounded-full px-4 py-2 text-sm text-white hover:bg-white/5 transition-colors">
+            <Link href="/pentra" className="inline-flex items-center gap-2 border border-gray-700 rounded-full px-4 py-2 text-sm text-white hover:bg-white/5 transition-colors">
               Launch test
             </Link>
           </div>

@@ -10,7 +10,7 @@ export default function PrivacyPage() {
         <p className="text-gray-500 text-sm mb-12">Last updated: March 2026</p>
         <div className="prose prose-invert prose-gray max-w-none space-y-6 text-gray-300">
           <p>
-            Calpen (&quot;we&quot;, &quot;us&quot;) respects your privacy. This policy describes how we collect, use, and protect information when you use our IVR penetration testing service.
+            Pentra (&quot;we&quot;, &quot;us&quot;) respects your privacy. This policy describes how we collect, use, and protect information when you use our IVR penetration testing service.
           </p>
           <h2 className="font-serif text-xl text-white mt-8">Information we collect</h2>
           <p>

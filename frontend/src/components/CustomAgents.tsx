@@ -3,7 +3,7 @@
 import { Phone, FileText, Shield } from "lucide-react";
 
 const features = [
-  { icon: Phone, title: "One number, one line", description: "You give Calpen one phone number and a one-line description of your company. That's the only input." },
+  { icon: Phone, title: "One number, one line", description: "You give Pentra one phone number and a one-line description of your company. That's the only input." },
   { icon: FileText, title: "AI voice agents call", description: "Agents call like real customers, explore each branch, and document what options exist and whether the task completes without a human." },
   { icon: Shield, title: "Zero internal access", description: "We audit your entire phone system from the outside. No code, no backend, no VPN—just the number callers use." },
 ];

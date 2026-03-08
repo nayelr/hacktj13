@@ -12,7 +12,7 @@ export function Hero() {
       <div className="absolute inset-0 bg-gradient-to-b from-[#13110e]/60 via-[#13110e]/40 to-[#13110e]" />
       <div className="relative z-10 flex-1 flex flex-col items-center justify-center text-center px-4 pt-32">
         <Link
-          href="/calpen"
+          href="/pentra"
           className="inline-flex items-center gap-2 glass-nav rounded-full px-4 py-2 text-sm text-gray-300 hover:text-white transition-colors mb-8 animate-fade-in-up"
         >
           <span className="w-2 h-2 bg-green-500 rounded-full pulse-indicator" />
@@ -30,7 +30,7 @@ export function Hero() {
           Automated IVR audits—AI agents call every branch and map friction points.
         </p>
         <Link
-          href="/calpen"
+          href="/pentra"
           className="mt-8 bg-white text-black font-medium px-6 py-3 rounded-full hover:bg-gray-100 transition-colors animate-fade-in-up animate-delay-300"
         >
           Launch penetration test

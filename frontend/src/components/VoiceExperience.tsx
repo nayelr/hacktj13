@@ -23,7 +23,7 @@ export function VoiceExperience() {
               <p className="text-gray-400 leading-relaxed mb-6">
                 Every discovered node is clickable. Expand to see menu depth, retry count, outcome, and the full transcript for that path. Green = automated, red = human transfer, yellow = partial.
               </p>
-              <Link href="/calpen" className="inline-flex items-center gap-2 border border-gray-700 rounded-full px-4 py-2 text-sm text-white hover:bg-white/5 transition-colors w-fit">
+              <Link href="/pentra" className="inline-flex items-center gap-2 border border-gray-700 rounded-full px-4 py-2 text-sm text-white hover:bg-white/5 transition-colors w-fit">
                 Run a test
               </Link>
             </div>

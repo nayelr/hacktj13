@@ -1799,6 +1799,78 @@ def suggest_tasks():
     return jsonify({"tasks": tasks})
 
 
+TERAC_API_PATH = os.getenv("TERAC_API_PATH", "/api/trpc/opportunity.create")
+
+
+def create_terac_expert_task(phone_number: str, description: str, website_url: str = "") -> dict:
+    """
+    Create a Terac expert task: expert calls the phone number and finds edge cases.
+    Terac uses tRPC (https://terac.com/api/trpc/...).  Set TERAC_API_PATH to override
+    the procedure path once confirmed with Terac's team.
+    """
+    api_key = (os.getenv("TERAC_API_KEY") or "").strip()
+    if not api_key:
+        return {"ok": False, "error": "Terac is not configured (TERAC_API_KEY missing)."}
+    base_url = (os.getenv("TERAC_API_BASE_URL") or "").rstrip("/")
+    if not base_url:
+        return {"ok": False, "error": "Terac API base URL not configured (TERAC_API_BASE_URL missing)."}
+    instructions = (
+        "You will call the company's phone number and test their automated phone system (IVR). "
+        "Use the scenario and business description below. Your goal is to find edge cases and failures: "
+        "confusing menus, recognition errors, dead ends, or places where the system fails to help. "
+        "Call the number, try the scenario, and report what you found.\n\n"
+        f"Phone number to call: {phone_number}\n\n"
+        f"Business description / scenario: {description}"
+    )
+    if website_url:
+        instructions += f"\n\nOptional context – company website: {website_url}"
+    payload = {
+        "json": {
+            "description": instructions,
+            "phone_number": phone_number,
+            "scenario": description,
+        }
+    }
+    url = base_url + TERAC_API_PATH
+    req = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+            result_data = data.get("result", {}).get("data", {}).get("json", data)
+            task_id = (
+                result_data.get("id")
+                or result_data.get("task_id")
+                or result_data.get("opportunity_id")
+            )
+            return {"ok": True, "task_id": task_id, "response": result_data}
+    except HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        try:
+            err_data = json.loads(body)
+            err_inner = err_data.get("error", {})
+            msg = (
+                err_inner.get("message")
+                or err_data.get("message")
+                or err_data.get("error")
+                or body
+                or str(e)
+            )
+        except Exception:
+            msg = body or str(e)
+        return {"ok": False, "error": f"Terac API {e.code}: {msg}", "url": url}
+    except (URLError, OSError) as e:
+        return {"ok": False, "error": f"Terac connection failed ({url}): {e}"}
+
+
 @app.route("/api/discovery/run", methods=["POST"])
 def discovery_run():
     """
@@ -1835,6 +1907,27 @@ def discovery_run():
         "tasks": tasks,
         "transcript_excerpt": transcript_lines[:20],
     })
+
+
+@app.route("/api/terac/create", methods=["POST"])
+def terac_create():
+    """
+    Create a Terac expert task (tester only) with phone number and business description.
+    Request body: { "phone", "description", "website_url" (optional) }.
+    """
+    data = request.get_json() or {}
+    phone = normalize_us_phone_number(data.get("phone") or data.get("to_number") or "")
+    if not phone or not validate_phone_number(phone):
+        return jsonify({"ok": False, "error": "Phone number must be a valid US number."}), 400
+    description = (data.get("description") or "").strip()
+    if not description:
+        return jsonify({"ok": False, "error": "Business description is required."}), 400
+    website_url = (data.get("website_url") or "").strip()
+    result = create_terac_expert_task(phone, description, website_url)
+    if result.get("ok"):
+        return jsonify(result), 200
+    # Return 200 so client gets JSON; frontend can show error and still continue launch
+    return jsonify(result), 200
 
 
 @app.route("/api/voices", methods=["GET"])

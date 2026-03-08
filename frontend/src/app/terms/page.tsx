@@ -10,11 +10,11 @@ export default function TermsPage() {
         <p className="text-gray-500 text-sm mb-12">Last updated: March 2026</p>
         <div className="prose prose-invert prose-gray max-w-none space-y-6 text-gray-300">
           <p>
-            By using Calpen&apos;s IVR penetration testing service, you agree to these terms.
+            By using Pentra&apos;s IVR penetration testing service, you agree to these terms.
           </p>
           <h2 className="font-serif text-xl text-white mt-8">Use of the service</h2>
           <p>
-            You may use Calpen only for lawful purposes and only on phone numbers and systems you are authorized to test. You are responsible for ensuring that your use complies with applicable laws and that you have any required consent (e.g., from the owner of the phone number or system).
+            You may use Pentra only for lawful purposes and only on phone numbers and systems you are authorized to test. You are responsible for ensuring that your use complies with applicable laws and that you have any required consent (e.g., from the owner of the phone number or system).
           </p>
           <h2 className="font-serif text-xl text-white mt-8">No warranty</h2>
           <p>
@@ -22,7 +22,7 @@ export default function TermsPage() {
           </p>
           <h2 className="font-serif text-xl text-white mt-8">Limitation of liability</h2>
           <p>
-            To the extent permitted by law, Calpen and its providers shall not be liable for any indirect, incidental, or consequential damages arising from your use of the service.
+            To the extent permitted by law, Pentra and its providers shall not be liable for any indirect, incidental, or consequential damages arising from your use of the service.
           </p>
           <h2 className="font-serif text-xl text-white mt-8">Changes</h2>
           <p>
