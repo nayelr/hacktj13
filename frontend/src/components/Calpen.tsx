@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navbar } from "@/components/Navbar";
 
 type RunConfig = {
@@ -917,49 +917,95 @@ export default function Calpen() {
   const [cfg, setCfg] = useState<RunConfig | null>(null);
   const [results, setResults] = useState<AgentCardState[]>([]);
   const activeAnalysisPollsRef = useRef<Set<string>>(new Set());
+  const analysisIdToIndexRef = useRef<Map<string, number>>(new Map());
+  const pollingUnmountedRef = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
+    return () => {
+      pollingUnmountedRef.current = true;
+    };
+  }, []);
 
+  // Merge incoming live-call state without overwriting already-completed analysis fields.
+  const handleProgress = useCallback((liveAgents: AgentCardState[]) => {
+    setResults((prev) => {
+      const indexed = new Map(prev.map((a) => [a.index, a]));
+      return liveAgents.map((liveAgent) => {
+        const existing = indexed.get(liveAgent.index);
+        if (!existing || existing.result?.analysis_pending !== false) {
+          return liveAgent;
+        }
+        // Analysis already completed — preserve its fields so they aren't overwritten.
+        return {
+          ...liveAgent,
+          result: {
+            ...liveAgent.result,
+            analysis_pending: false,
+            result_summary: existing.result.result_summary,
+            issues_detected: existing.result.issues_detected,
+            analysis_report: existing.result.analysis_report,
+            transcript_excerpt: existing.result.transcript_excerpt,
+            analysis_error: existing.result.analysis_error,
+          },
+        };
+      });
+    });
+  }, []);
+
+  useEffect(() => {
     results.forEach((agent) => {
       const analysisId = agent.result?.analysis_id;
       if (!analysisId || !agent.result?.analysis_pending || activeAnalysisPollsRef.current.has(analysisId)) {
         return;
       }
 
+      const agentIndex = agent.index;
       activeAnalysisPollsRef.current.add(analysisId);
+      analysisIdToIndexRef.current.set(analysisId, agentIndex);
+
       pollAnalysis(analysisId, 240000)
         .then((analysisResult) => {
-          if (cancelled) return;
+          if (pollingUnmountedRef.current) return;
+          const index = analysisIdToIndexRef.current.get(analysisId);
+          analysisIdToIndexRef.current.delete(analysisId);
+          if (index === undefined) return;
+
           if (!analysisResult) {
             setResults((prev) =>
-              mergeAgentResultPayload(prev, agent.index, {
+              mergeAgentResultPayload(prev, index, {
                 analysis_pending: false,
-                analysis_error: prev.find((item) => item.index === agent.index)?.result?.analysis_error || "Timed out waiting for post-call analysis.",
+                analysis_error:
+                  prev.find((item) => item.index === index)?.result?.analysis_error ||
+                  "Timed out waiting for post-call analysis.",
               })
             );
             return;
           }
 
-          setResults((prev) =>
-            mergeAgentResultPayload(
-              prev,
-              agent.index,
-              {
-                ...(analysisResult as Partial<NonNullable<AgentCardState["result"]>>),
-                analysis_pending: false,
-              }
-            )
-          );
+          setResults((prev) => {
+            const existing = prev.find((a) => a.index === index)?.result;
+            const fromAnalysis = analysisResult as Partial<NonNullable<AgentCardState["result"]>>;
+            const validDuration =
+              fromAnalysis.duration_seconds != null && Number(fromAnalysis.duration_seconds) > 0
+                ? Number(fromAnalysis.duration_seconds)
+                : undefined;
+            const validElapsed =
+              fromAnalysis.elapsed_wait_seconds != null && Number(fromAnalysis.elapsed_wait_seconds) >= 0
+                ? Number(fromAnalysis.elapsed_wait_seconds)
+                : undefined;
+            const updates: Partial<NonNullable<AgentCardState["result"]>> = {
+              ...fromAnalysis,
+              analysis_pending: false,
+              duration_seconds: validDuration ?? existing?.duration_seconds ?? undefined,
+              elapsed_wait_seconds: validElapsed ?? existing?.elapsed_wait_seconds ?? undefined,
+            };
+            return mergeAgentResultPayload(prev, index, updates);
+          });
         })
         .finally(() => {
           activeAnalysisPollsRef.current.delete(analysisId);
         });
     });
-
-    return () => {
-      cancelled = true;
-    };
   }, [results]);
 
   return (
@@ -978,9 +1024,9 @@ export default function Calpen() {
         <div className="pt-24 pb-12">
           <LivePage
             cfg={cfg}
-            onProgress={setResults}
+            onProgress={handleProgress}
             onDone={(nextResults) => {
-              setResults(nextResults);
+              handleProgress(nextResults);
               setPage("report");
             }}
             onCancel={() => {

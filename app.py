@@ -1141,7 +1141,7 @@ _pending_analyses_lock = threading.Lock()
 
 
 def _run_post_call_analysis(analysis_id: str, task: str, entry: dict, wait_result: dict, run_id: str):
-    """Background worker: fetch conversation details + run OpenAI analysis."""
+    """Background worker: fetch conversation details + run OpenAI analysis. Updates entry in place."""
     try:
         detail_payloads = fetch_conversation_detail_payloads(
             call_sid=entry.get("call_sid"),
@@ -1173,8 +1173,7 @@ def _run_post_call_analysis(analysis_id: str, task: str, entry: dict, wait_resul
         entry["analysis_error"] = str(exc)
     finally:
         _unregister_active_call(run_id, entry.get("call_sid"), entry.get("conversation_id"))
-        with _pending_analyses_lock:
-            _pending_analyses[analysis_id] = entry
+        entry["analysis_done"] = True
 
 
 def run_single_batch_call(business_description: str, to_number: str, task: str, voice_ids=None, run_id: str = "", async_analysis: bool = False):
@@ -1244,9 +1243,12 @@ def run_single_batch_call(business_description: str, to_number: str, task: str, 
         analysis_id = _uuid.uuid4().hex
         entry["analysis_pending"] = True
         entry["analysis_id"] = analysis_id
+        entry["analysis_done"] = False
+        with _pending_analyses_lock:
+            _pending_analyses[analysis_id] = entry
         t = threading.Thread(
             target=_run_post_call_analysis,
-            args=(analysis_id, task, dict(entry), wait_result, run_id),
+            args=(analysis_id, task, entry, wait_result, run_id),
             daemon=True,
         )
         t.start()
@@ -1661,12 +1663,16 @@ def start_single_batch_call():
 
 @app.route("/api/call/batch/one/analysis", methods=["GET"])
 def poll_single_batch_analysis():
-    """Poll for the async analysis result of a single batch call."""
+    """Poll for the async analysis result of a single batch call. Only returns ready when analysis_done."""
     analysis_id = request.args.get("id", "").strip()
     if not analysis_id:
         return jsonify({"error": "Missing id parameter."}), 400
     with _pending_analyses_lock:
-        result = _pending_analyses.pop(analysis_id, None)
+        result = _pending_analyses.get(analysis_id)
+        if result is not None and result.get("analysis_done"):
+            _pending_analyses.pop(analysis_id, None)
+        else:
+            result = None
     if result is None:
         return jsonify({"ready": False})
     return jsonify({"ready": True, "result": result})
