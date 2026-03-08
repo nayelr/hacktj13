@@ -42,7 +42,6 @@ function AnimatedCounter({ target, suffix = "" }: { target: number; suffix?: str
 }
 
 const TYPEWRITER_TEXT = "you decide…";
-const DELAY_AFTER_65_PERCENT_MS = 3200;
 
 function AgentsCountWithTypewriter() {
   const [count, setCount] = useState(0);
@@ -50,7 +49,6 @@ function AgentsCountWithTypewriter() {
   const [phase, setPhase] = useState<"count" | "type">("count");
   const ref = useRef<HTMLDivElement>(null);
   const [isVisible, setIsVisible] = useState(false);
-  const [started, setStarted] = useState(false);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -62,16 +60,10 @@ function AgentsCountWithTypewriter() {
   }, []);
 
   useEffect(() => {
-    if (!isVisible || started) return;
-    const t = setTimeout(() => setStarted(true), DELAY_AFTER_65_PERCENT_MS);
-    return () => clearTimeout(t);
-  }, [isVisible, started]);
-
-  useEffect(() => {
-    if (!started) return;
+    if (!isVisible) return;
     if (phase === "count") {
       const target = 50;
-      const delayFor = (step: number) => (step >= 30 ? 28 : Math.max(28, 160 - step * 4));
+      const delayFor = (step: number) => (step >= 30 ? 65 : Math.max(65, 180 - step * 3));
       let step = 1;
       let timeoutId: ReturnType<typeof setTimeout>;
       const run = () => {
@@ -96,7 +88,7 @@ function AgentsCountWithTypewriter() {
       }, speedUp(i));
       return () => clearTimeout(timeout);
     }
-  }, [started, phase, typed]);
+  }, [isVisible, phase, typed]);
 
   return (
     <div ref={ref} className="text-5xl md:text-6xl font-light text-white">
