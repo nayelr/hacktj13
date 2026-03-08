@@ -62,17 +62,17 @@ function AgentsCountWithTypewriter() {
   useEffect(() => {
     if (!isVisible) return;
     if (phase === "count") {
-      const target = 9;
-      const delays = [380, 340, 300, 260, 220, 180, 140, 100, 80];
+      const target = 50;
+      const delayFor = (step: number) => (step >= 30 ? 28 : Math.max(28, 160 - step * 4));
       let step = 1;
       let timeoutId: ReturnType<typeof setTimeout>;
       const run = () => {
         setCount(step);
         if (step >= target) {
-          timeoutId = setTimeout(() => setPhase("type"), delays[delays.length - 1] ?? 80);
+          timeoutId = setTimeout(() => setPhase("type"), 60);
           return;
         }
-        timeoutId = setTimeout(run, delays[step - 1] ?? 80);
+        timeoutId = setTimeout(run, delayFor(step));
         step += 1;
       };
       run();
@@ -92,8 +92,8 @@ function AgentsCountWithTypewriter() {
 
   return (
     <div ref={ref} className="text-5xl md:text-6xl font-light text-white">
-      {count > 0 && <span>{count}</span>}
-      {typed && <span className="text-gray-400 italic"> {typed}</span>}
+      {phase === "count" && count > 0 && <span>{count}</span>}
+      {typed && <span className="text-white">{phase === "type" ? typed : ` ${typed}`}</span>}
     </div>
   );
 }
