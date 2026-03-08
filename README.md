@@ -3,7 +3,7 @@
 Flask app for testing business phone flows with browser voice and outbound phone calls.
 
 - Voice conversation (web): You are the company, the ElevenLabs agent is the caller/customer.
-- Batch outbound phone test: Run 2-10 calls one-by-one across a task list.
+- Batch outbound phone test: Run 1-10 calls one-by-one across a task list.
 - Task suggestion: Generate a starter task list from the business summary.
 - Post-call analysis report: Detect edge cases/issues from transcript + call telemetry.
 
@@ -59,7 +59,7 @@ Flask `/` now redirects to `FRONTEND_URL` by default. You can change this with:
 
 1. Enter business summary (required) and optional website.
 2. Enter task list (one task per line) or click **Suggest tasks from summary**.
-3. Set number of test agents between 2 and 10.
+3. Set number of test agents between 1 and 10.
 4. Enter destination US phone number (`5551234567` or `+15551234567`).
 5. Click **Run batch test**.
 

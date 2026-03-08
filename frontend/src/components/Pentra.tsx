@@ -87,7 +87,7 @@ type AgentCardState = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5001";
-const MIN_AGENTS = 2;
+const MIN_AGENTS = 1;
 const MAX_AGENTS = 10;
 
 function apiUrl(path: string) {
@@ -224,7 +224,7 @@ function InputPage({
   const [phone, setPhone] = useState("");
   const [description, setDescription] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
-  const [numAgents, setNumAgents] = useState(3);
+  const [numAgents, setNumAgents] = useState(1);
   const [tasksRaw, setTasksRaw] = useState("- book appointment\n- cancel appointment\n- check status");
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
@@ -406,7 +406,7 @@ function InputPage({
 
             <div className="grid md:grid-cols-3 gap-4 mb-4">
               <div>
-                <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Agents (2-10)</label>
+                <label className="block text-xs uppercase tracking-wider text-gray-500 mb-2">Agents (1-10)</label>
                 <input
                   type="number"
                   min={MIN_AGENTS}

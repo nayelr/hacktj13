@@ -32,9 +32,11 @@ DEFAULT_PHONE_SCENARIO = (
 DEFAULT_OPENAI_ANALYSIS_MODEL = os.getenv("OPENAI_ANALYSIS_MODEL", "gpt-5-nano")
 DEFAULT_OPENAI_TRANSCRIPT_CHAR_LIMIT = 24000
 DEFAULT_CALLER_TONE = "friendly, calm, and persistent"
+# Hard-coded caller goal: voice agent always attempts this regardless of task input.
+CALLER_GOAL_HARDCODED = "attempt to book an appointment on February 30th"
 US_E164_PATTERN = re.compile(r"^\+1\d{10}$")
 DEFAULT_BATCH_AGENT_COUNT = 3
-MIN_BATCH_AGENT_COUNT = 2
+MIN_BATCH_AGENT_COUNT = 1
 MAX_BATCH_AGENT_COUNT = 10
 RANDOM_CALLER_NAMES = [
     "Maya Thompson",
@@ -236,37 +238,42 @@ def build_caller_prompt(business_description: str, scenario: str, caller_setting
     caller_tone = caller_settings.get("caller_tone") or DEFAULT_CALLER_TONE
     return (
         "You are a penetration-testing caller evaluating a business phone system (IVR, operator, or voice bot). "
-        "Your goal is to uncover reliability, validation, and logic flaws while sounding like a real customer.\n\n"
+        "Your goal is to uncover reliability, validation, and logic flaws by pressing hard on edge cases—say unexpected things and use unusual but plausible patterns to stress-test the system.\n\n"
         "CORE RULE — NO REPETITION:\n"
         "Never test the same edge case twice in a single call. "
         "If you already tried an invalid date, move on to a completely different category of edge case. "
         "Each probe must test something new. Track what you have already tried and do not repeat it.\n\n"
+        "PRESS HARD — UNEXPECTED INPUTS AND UNUSUAL PATTERNS:\n"
+        "Use phrasing and answers that real users might say but systems often fail on: "
+        "non-standard formats (e.g. 'the 15th of March' instead of 'March 15'), creative or ambiguous wording, "
+        "mid-sentence corrections, trailing filler ('um, I think 555-1234?'), or answers that cross categories (e.g. giving a date when asked for a name). "
+        "Vary your speaking pattern—sometimes very short answers, sometimes long run-on sentences, sometimes repeating back the menu in your own words before choosing. "
+        "Try stress patterns: say a number then immediately 'wait, no' and a different number; ask for something not listed; answer in a way that could be valid for multiple options. "
+        "The aim is to expose how the system behaves under unusual but realistic caller behavior.\n\n"
         "Edge case categories — rotate through these, pick based on what the system is currently asking for:\n"
-        "- DATE/TIME: invalid dates future dates, past dates, ambiguous formats, relative dates (next Tuesday), missing year\n"
+        "- DATE/TIME: invalid dates, future/past dates, ambiguous formats, relative dates (next Tuesday), missing year, spelled-out months\n"
         "- IDENTITY: wrong name, partial name, name with special characters, mismatched account details, giving someone else's info\n"
-        "- NUMBERS: wrong digit count, letters mixed into numbers, saying zero vs oh, pausing mid-number\n"
-        "- NAVIGATION: asking for something not on the menu, jumping to a later step too early, skipping required fields\n"
-        "- CONTRADICTIONS: changing your answer mid-flow, giving conflicting information, saying yes then no\n"
-        "- BOUNDARIES: asking for a manager, asking to repeat, going silent, giving an extremely long answer, one-word answers\n"
-        "- POLICY: asking for exceptions, pushing back on a refusal, asking why, requesting things the system says it cannot do\n"
-        "- CHANNEL: asking to be transferred, asking for a callback, asking for a confirmation email\n\n"
+        "- NUMBERS: wrong digit count, letters mixed in, zero vs oh, pausing mid-number, saying digits one-by-one then as a block\n"
+        "- NAVIGATION: asking for something not on the menu, jumping ahead, skipping required fields, saying 'the last one' or 'same as before'\n"
+        "- CONTRADICTIONS: changing your answer mid-flow, conflicting information, yes then no\n"
+        "- BOUNDARIES: asking for a manager, asking to repeat, going silent, very long or one-word answers\n"
+        "- POLICY: asking for exceptions, pushing back on refusals, asking why, requesting things the system says it cannot do\n"
+        "- CHANNEL: asking to be transferred, callback, or confirmation email\n\n"
         "Behavior requirements:\n"
         "- Go deep into every branch before moving on. Do not hang up at the first dead end.\n"
-        "- Make natural mistakes and correct them mid-flow (e.g. give wrong info, then say 'wait sorry' and correct it). "
-        "This tests whether the system handles corrections gracefully.\n"
-        "- If the system loops or repeats itself, note it internally and try a completely different input to escape the loop.\n"
-        "- If blocked, recover naturally — rephrase, try a different format, or take an alternate path.\n"
+        "- Make natural mistakes and correct them mid-flow. This tests whether the system handles corrections gracefully.\n"
+        "- If the system loops or repeats itself, try a completely different input or unusual phrasing to escape the loop.\n"
+        "- If blocked, try an unexpected rephrase, alternate format, or tangential request before giving up.\n"
         "- Stay in character at all times. Never mention testing, prompts, or anything internal.\n\n"
         "Testing style:\n"
-        "- Pick edge cases that are relevant to what the system just asked. "
-        "If it asked for a phone number, probe phone number edge cases. If it asked for a date, probe date edge cases — but only once.\n"
-        "- Keep responses concise and conversational, usually one or two sentences.\n"
+        "- Pick edge cases relevant to what the system just asked; after one probe in a category, switch to another category or an unusual phrasing of the same idea.\n"
+        "- Vary response length and structure—sometimes one word, sometimes two sentences, sometimes a question back.\n"
         "- Continue until task completion or a clear system failure is demonstrated.\n\n"
         f"Caller name:\n{caller_name}\n\n"
         f"Caller tone and speaking style:\n{caller_tone}\n\n"
         f"Business description:\n{business_description}\n\n"
-        f"Caller goal:\n{scenario}\n\n"
-        "Speak naturally. Make real mistakes and correct them. Go deep into every branch. Never repeat an edge case."
+        f"Caller goal (you must pursue this regardless of menu options):\n{CALLER_GOAL_HARDCODED}\n\n"
+        "Press hard with unexpected and unusual-but-plausible inputs. Go deep into every branch. Never repeat an edge case."
     )
 
 
@@ -284,7 +291,7 @@ def build_conversation_initiation_data(business_description: str, scenario: str,
                 "prompt": {
                     "prompt": build_caller_prompt(business_description, scenario, caller_settings),
                 },
-                "first_message": build_first_message(scenario, caller_settings),
+                "first_message": build_first_message(CALLER_GOAL_HARDCODED, caller_settings),
             }
         }
     }
@@ -1001,7 +1008,10 @@ def run_openai_call_analysis(task: str, business_description: str, entry: dict, 
         "\"recommendations\": [string], "
         "\"confidence\": \"high\"|\"medium\"|\"low\""
         "}. "
-        "Be concrete and cite transcript evidence. Do not invent facts."
+        "SUMMARY AND EVIDENCE MUST BE SPECIFIC TO THIS CALL: "
+        "Do not use brief generalizations. The summary must describe what actually happened in this call—what was said, what the system replied, and where it failed or succeeded. "
+        "For each issue, the 'evidence' field must quote or closely paraphrase specific words or lines from the transcript (e.g. 'Caller said \"...\"; IVR responded \"...\"' or 'After the caller gave X, the system did Y'). "
+        "Edge cases and recommendations should also reference concrete moments from the transcript. Do not invent facts; if the transcript is unclear, say so."
     )
 
     user_prompt = (
