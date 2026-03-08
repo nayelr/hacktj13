@@ -284,19 +284,6 @@ def build_conversation_initiation_data(business_description: str, scenario: str,
     return conversation_data
 
 
-def build_demo_counterparty_prompt(business_description: str, service_prompt: str):
-    custom_prompt = (service_prompt or "").strip()
-    if custom_prompt:
-        return custom_prompt
-    return (
-        "You are the business-side voice agent answering an inbound customer call. "
-        "Behave like a concise customer service representative or IVR for the business below. "
-        "Answer questions, request information when needed, enforce formatting and policy rules, "
-        "and stay in character as the business.\n\n"
-        f"Business description:\n{business_description}"
-    )
-
-
 def normalize_scenario(value: str):
     scenario = (value or "").strip()
     return scenario or DEFAULT_PHONE_SCENARIO
@@ -1480,108 +1467,6 @@ def conversation_signed_url():
         "signed_url": signed_url,
         "conversation_config_override": conversation_config_override.get("conversation_config_override", {}),
     })
-
-
-@app.route("/api/demo/simulate", methods=["POST"])
-def demo_simulate():
-    """Simulate a demo conversation between the configured penetration-test agent and a business-side prompt."""
-    data = request.get_json() or {}
-    try:
-        business_description, website_url = resolve_business_description(data)
-        if website_url:
-            session["website_url"] = website_url
-            session["business_description"] = business_description
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-
-    scenario = normalize_scenario(data.get("scenario") or get_session_value("scenario"))
-    service_agent_id = (os.getenv("DEMO_AGENT_ID") or "").strip()
-    if not service_agent_id:
-        return jsonify({"error": "DEMO_AGENT_ID is not set in .env."}), 500
-    service_prompt = (data.get("service_prompt") or "").strip()
-    service_first_message = (data.get("service_first_message") or "").strip()
-    try:
-        service_agent = elevenlabs_get(f"/v1/convai/agents/{service_agent_id}")
-    except Exception as exc:
-        return jsonify({"error": f"Failed to load demo service agent: {exc}"}), 502
-    service_conversation_config = service_agent.get("conversation_config") or {}
-    service_agent_config = service_conversation_config.get("agent") or {}
-    service_prompt = service_prompt or str(
-        ((service_agent_config.get("prompt") or {}).get("prompt")) or ""
-    ).strip()
-    service_first_message = service_first_message or str(service_agent_config.get("first_message") or "").strip()
-
-    service_prompt = build_demo_counterparty_prompt(
-        business_description=business_description,
-        service_prompt=service_prompt,
-    )
-    try:
-        max_turns = int(data.get("max_turns") or 18)
-    except (TypeError, ValueError):
-        max_turns = 18
-    max_turns = max(4, min(40, max_turns))
-
-    try:
-        agent_id = ensure_session_agent_is_synced(business_description, scenario)
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
-
-    simulation_specification = {
-        "simulated_user_config": {
-            "prompt": {"prompt": service_prompt},
-        },
-        "new_turns_limit": max_turns,
-    }
-    if service_first_message:
-        simulation_specification["simulated_user_config"]["first_message"] = service_first_message
-
-    try:
-        simulation_response = elevenlabs_post(
-            f"/v1/convai/agents/{agent_id}/simulate-conversation",
-            {"simulation_specification": simulation_specification},
-        )
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
-
-    transcript = []
-    for idx, turn in enumerate(simulation_response.get("simulated_conversation") or [], start=1):
-        if not isinstance(turn, dict):
-            continue
-        role = normalize_status_text(
-            turn.get("role") or turn.get("speaker") or turn.get("source") or turn.get("author")
-        ) or "unknown"
-        text = (
-            turn.get("text")
-            or turn.get("message")
-            or turn.get("content")
-            or turn.get("utterance")
-            or ""
-        )
-        text = str(text or "").strip()
-        if not text:
-            continue
-        transcript.append(
-            {
-                "index": idx,
-                "role": role,
-                "label": "Penetration Agent" if role == "agent" else "Customer Service Agent",
-                "text": text,
-                "time_in_call_secs": turn.get("time_in_call_secs"),
-            }
-        )
-
-    return jsonify(
-        {
-            "ok": True,
-            "agent_id": agent_id,
-            "service_agent_id": service_agent_id or None,
-            "scenario": scenario,
-            "turn_count": len(transcript),
-            "transcript": transcript,
-            "analysis": simulation_response.get("analysis") or simulation_response.get("conversation_analysis") or {},
-            "raw": simulation_response,
-        }
-    )
 
 
 @app.route("/api/call", methods=["POST"])
