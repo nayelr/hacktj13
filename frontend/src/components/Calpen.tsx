@@ -483,7 +483,7 @@ function LivePage({
               </div>
               <p className="text-sm text-[var(--calpen-muted)] mb-3">{agent.task}</p>
               <div className="space-y-1 text-xs text-[var(--calpen-muted)] font-mono mb-3">
-                <p>Call duration: {formatSeconds(agent.result?.duration_seconds)}</p>
+                <p>Call duration: {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)}</p>
                 <p>Wait elapsed: {formatSeconds(agent.result?.elapsed_wait_seconds)}</p>
                 {agent.result?.call_sid ? <p>Call SID: {agent.result.call_sid}</p> : null}
               </div>
@@ -542,7 +542,10 @@ function ReportPage({
   const metrics = useMemo(() => {
     const initiated = results.length;
     const totalDuration = results.reduce((sum, r) => {
-      const v = Number(r.result?.duration_seconds);
+      let v = Number(r.result?.duration_seconds);
+      if (Number.isNaN(v) || v < 0) {
+        v = Number(r.result?.elapsed_wait_seconds);
+      }
       return Number.isNaN(v) || v < 0 ? sum : sum + v;
     }, 0);
     const averageDuration = initiated > 0 ? totalDuration / initiated : 0;
@@ -593,7 +596,7 @@ function ReportPage({
                 Agent {agent.index} · {agent.task}
               </p>
               <p className="font-serif text-sm text-gray-400 mb-3">
-                {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds)}
+                {(agent.result?.wait_status || agent.result?.status || "unknown")} · duration {formatSeconds(agent.result?.duration_seconds ?? agent.result?.elapsed_wait_seconds)}
               </p>
               {agent.result?.result_summary ? (
                 <p className="font-serif text-base text-gray-300 mb-3 leading-relaxed">{agent.result.result_summary}</p>
